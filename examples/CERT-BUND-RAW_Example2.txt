@@ -1,0 +1,199 @@
+{
+  _id: ObjectId('69fe53e3cae57419a4e2d64d'),
+  tracking: {
+    current_release_date: '2026-05-07T22:00:00.000+00:00',
+    generator: {
+      date: '2026-05-08T11:08:22.069+00:00',
+      engine: {
+        name: 'BSI-WID',
+        version: '1.5.0'
+      }
+    },
+    id: 'WID-SEC-W-2026-1430',
+    initial_release_date: '2026-05-07T22:00:00.000+00:00',
+    revision_history: [
+      {
+        date: '2026-05-07T22:00:00.000+00:00',
+        number: '1',
+        summary: 'Initiale Fassung'
+      }
+    ],
+    status: 'final',
+    version: '1'
+  },
+  affected_versions: [
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '<=7.0.4',
+      cpe: '',
+      is_fixed: false,
+      csaf_pid: 'T053686'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '<=7.0.4',
+      cpe: '',
+      is_fixed: true,
+      csaf_pid: 'T053686-fixed'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '<6.6.138',
+      cpe: '',
+      is_fixed: false,
+      csaf_pid: 'T053694'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '6.6.138',
+      cpe: 'cpe:/o:linux:linux_kernel:6.6.138',
+      is_fixed: true,
+      csaf_pid: 'T053694-fixed'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '<6.12.87',
+      cpe: '',
+      is_fixed: false,
+      csaf_pid: 'T053695'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '6.12.87',
+      cpe: 'cpe:/o:linux:linux_kernel:6.12.87',
+      is_fixed: true,
+      csaf_pid: 'T053695-fixed'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '<6.18.28',
+      cpe: '',
+      is_fixed: false,
+      csaf_pid: 'T053696'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '6.18.28',
+      cpe: 'cpe:/o:linux:linux_kernel:6.18.28',
+      is_fixed: true,
+      csaf_pid: 'T053696-fixed'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '<7.0.5',
+      cpe: '',
+      is_fixed: false,
+      csaf_pid: 'T053697'
+    },
+    {
+      product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+      version: '7.0.5',
+      cpe: 'cpe:/o:linux:linux_kernel:7.0.5',
+      is_fixed: true,
+      csaf_pid: 'T053697-fixed'
+    }
+  ],
+  last_imported_at: ISODate('2026-05-08T21:21:39.452Z'),
+  product_ids: [
+    ObjectId('69fe53e3cae57419a4e2d629')
+  ],
+  status: 'raw',
+  summary: 'Ein lokaler Angreifer kann mehrere Schwachstellen im Linux Kernel ausnutzen, um Administratorrechte zu erlangen.',
+  title: 'Linux Kernel (Dirty Frag): Mehrere Schwachstellen ermöglichen Erlangen von Administratorrechten',
+  vulnerabilities_enriched: [
+    {
+      cve: 'CVE-2026-43284',
+      product_status: {
+        known_affected: [
+          'T053694',
+          'T053697',
+          'T053695',
+          'T053696'
+        ],
+        last_affected: [
+          'T053686'
+        ]
+      },
+      release_date: '2026-05-07T22:00:00.000+00:00',
+      title: 'CVE-2026-43284',
+      product_status_enriched: {
+        known_affected: [
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<6.6.138',
+            cpe: ''
+          },
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<7.0.5',
+            cpe: ''
+          },
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<6.12.87',
+            cpe: ''
+          },
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<6.18.28',
+            cpe: ''
+          }
+        ],
+        last_affected: [
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<=7.0.4',
+            cpe: ''
+          }
+        ]
+      }
+    },
+    {
+      cve: 'CVE-2026-43500',
+      product_status: {
+        known_affected: [
+          'T053694',
+          'T053697',
+          'T053695',
+          'T053696'
+        ],
+        last_affected: [
+          'T053686'
+        ]
+      },
+      release_date: '2026-05-07T22:00:00.000+00:00',
+      title: 'CVE-2026-43500',
+      product_status_enriched: {
+        known_affected: [
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<6.6.138',
+            cpe: ''
+          },
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<7.0.5',
+            cpe: ''
+          },
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<6.12.87',
+            cpe: ''
+          },
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<6.18.28',
+            cpe: ''
+          }
+        ],
+        last_affected: [
+          {
+            product_id: ObjectId('69fe53e3cae57419a4e2d629'),
+            version: '<=7.0.4',
+            cpe: ''
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  _id: ObjectId('69fbd5cdba07d6f795c48d14'),
+  euvd_id: 'EUVD-2026-28125',
+  aliases: 'GHSA-qfcx-mrg9-9h93\nCVE-2026-8011\n',
+  assigner: 'Chrome',
+  base_score: Double('0'),
+  base_score_vector: '',
+  base_score_version: '',
+  cve_ids: [
+    'CVE-2026-8011'
+  ],
+  date_published: ISODate('2026-05-06T21:31:41.000Z'),
+  date_updated: ISODate('2026-05-06T21:31:41.000Z'),
+  description: 'Insufficient policy enforcement in Search in Google Chrome prior to 148.0.7778.96 allowed a remote attacker to leak cross-origin data via a crafted HTML page. (Chromium security severity: Low)',
+  epss: Double('0'),
+  exploited_since: null,
+  mirrored_at: ISODate('2026-05-06T23:59:09.151Z'),
+  product_ids: [
+    ObjectId('69fbd4b3ba07d6f795c0d737')
+  ],
+  raw: {
+    id: 'EUVD-2026-28125',
+    enisaUuid: '77bc4c31-380b-38b4-a8bb-8cb234063fc6',
+    description: 'Insufficient policy enforcement in Search in Google Chrome prior to 148.0.7778.96 allowed a remote attacker to leak cross-origin data via a crafted HTML page. (Chromium security severity: Low)',
+    datePublished: 'May 6, 2026, 9:31:41 PM',
+    dateUpdated: 'May 6, 2026, 9:31:41 PM',
+    baseScore: Double('0'),
+    references: 'https://chromereleases.googleblog.com/2026/05/stable-channel-update-for-desktop.html\nhttps://issues.chromium.org/issues/496626029\nhttps://nvd.nist.gov/vuln/detail/CVE-2026-8011\n',
+    aliases: 'GHSA-qfcx-mrg9-9h93\nCVE-2026-8011\n',
+    assigner: 'Chrome',
+    epss: Double('0'),
+    enisaIdProduct: [
+      {
+        id: '7b3acaaf-3e02-34b7-850e-2c8b7523593a',
+        product: {
+          name: 'Chrome'
+        },
+        product_version: '148.0.7778.96 <148.0.7778.96'
+      }
+    ],
+    enisaIdVendor: [
+      {
+        id: '10ade325-934f-315a-9dca-a9c115e52809',
+        vendor: {
+          name: 'Google'
+        }
+      }
+    ]
+  },
+  references: 'https://chromereleases.googleblog.com/2026/05/stable-channel-update-for-desktop.html\nhttps://issues.chromium.org/issues/496626029\nhttps://nvd.nist.gov/vuln/detail/CVE-2026-8011\n',
+  vendor_ids: [
+    ObjectId('69fbd4b2ba07d6f795c0d3cc')
+  ]
+}
