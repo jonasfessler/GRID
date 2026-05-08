@@ -1,23 +1,44 @@
 {
   "config_type": "product_extraction_rules",
+  "version": "1.1",
   "extraction_paths": {
     "csaf": {
-      "path": "document.product_tree.branches",
-      "sub_selector": { "category": "product_name" },
+      "path": "product_tree.branches[]",
+      "vendor_selector": { "category": "vendor" },
+      "product_selector": { "category": "product_name" },
       "field": "name",
-      "note": "Searches within the vendor branches for the specific product names."
+      "version_path": "branches[].name",
+      "version_selector": { "category": ["product_version", "product_version_range"] },
+      "note": "Navigate the CSAF branch hierarchy: top-level vendor branch → product_name branch → version branches. product_tree is at the TOP LEVEL of the stored document. The product name is the 'name' of the product_name branch. Version ranges are in child branches with category 'product_version' or 'product_version_range'."
     },
     "euvd": {
-      "path": "enisaIdProduct",
+      "path": "enisaIdProduct[]",
       "field": "product.name",
-      "note": "Direct path to the product name in the EUVD structure."
+      "version_field": "product_version",
+      "vendor_link": "id",
+      "note": "Direct path to product name. The 'product_version' field contains version range strings (e.g. '0 <3.1.2'). Link to the corresponding vendor via matching the 'id' field against enisaIdVendor[].id."
     }
   },
   "normalization": {
+    "strip_vendor_prefix": {
+      "enabled": true,
+      "strategy": "prefix_match",
+      "note": "If the product name starts with the vendor name (e.g. 'Apache CloudStack' with vendor 'Apache'), remove the vendor prefix and trim. Use the normalized vendor name for matching, not the raw string."
+    },
     "clean_patterns": [
-      " version ", " v.", " ver. ", " Release ", " Edition ", " Build "
+      " version ", " v.", " ver. ", " Release ", " Edition ", " Build ",
+      " update ", " patch ", " SP", " HF"
     ],
-    "strip_vendor_prefix": true,
-    "note": "Removes the manufacturer name from the product name (e.g., 'Adobe Acrobat' -> 'Acrobat')."
+    "version_range_parsing": {
+      "enabled": true,
+      "patterns": {
+        "less_than": "< {version}",
+        "less_than_or_equal": "<= {version}",
+        "greater_than": "> {version}",
+        "greater_than_or_equal": ">= {version}",
+        "range": "{from} - {to}"
+      },
+      "note": "EUVD product_version strings use formats like '0 <3.1.2' or '0 <<3.12.260420'. The join pipeline should parse these into structured range objects for GRIDd."
+    }
   }
 }

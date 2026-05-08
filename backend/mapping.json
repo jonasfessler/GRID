@@ -1,46 +1,103 @@
 {
   "mapping_definition": {
     "name": "GRID-Raw-Equivalence-Map",
-    "version": "1.2",
-    "description": "Precise Path Definition based on BSI-CSAF and ENISA-EUVD Raw Data"
+    "version": "1.3",
+    "description": "Precise field path definitions for the GRIDd join pipeline, based on the raw GRIDr schemas of BSI-CSAF and ENISA-EUVD documents.",
+    "notes": [
+      "CSAF documents have the structure: { document: {...}, product_tree: {...}, vulnerabilities: [...] }",
+      "The 'vulnerabilities' array is at the TOP LEVEL of the stored document, NOT nested under 'document'.",
+      "EUVD 'aliases' is a raw newline-separated string. CVE extraction requires a regex: /CVE-\\d{4}-\\d+/g"
+    ]
   },
   "join_logic": {
     "primary_key": {
-      "csaf_path": "document.vulnerabilities.cve",
-      "euvd_path": "cve_ids",
-      "match_type": "array_lookup",
-      "note": "CSAF uses an array under document.vulnerabilities; EUVD uses the cve_ids array created by the ingester."
+      "csaf_path": "vulnerabilities[].cve",
+      "euvd_path": "aliases",
+      "match_type": "regex_extract",
+      "regex": "CVE-\\d{4}-\\d+",
+      "note": "Extract CVE IDs from both sides and join if any CVE-ID is shared. A single CSAF advisory may cover multiple CVEs — each is checked against the EUVD aliases string."
     }
   },
   "equivalent_fields": {
     "cvss_base_score": {
-      "csaf": "document.vulnerabilities.scores.cvss_v3.base_score",
-      "euvd": "baseScore"
+      "csaf": "vulnerabilities[].scores[].cvss_v3.baseScore",
+      "euvd": "baseScore",
+      "match_type": "scalar",
+      "note": "CSAF may have multiple score objects per vulnerability. Take the first cvss_v3 entry."
     },
     "cvss_vector": {
-      "csaf": "document.vulnerabilities.scores.cvss_v3.vector_string",
-      "euvd": "baseScoreVector"
+      "csaf": "vulnerabilities[].scores[].cvss_v3.vectorString",
+      "euvd": "baseScoreVector",
+      "match_type": "scalar"
+    },
+    "cvss_version": {
+      "csaf": "vulnerabilities[].scores[].cvss_v3.version",
+      "euvd": "baseScoreVersion",
+      "match_type": "scalar"
     },
     "summary_text": {
-      "csaf": "document.notes",
+      "csaf": "document.notes[]",
       "csaf_filter": "category == 'summary'",
-      "euvd": "description"
+      "csaf_field": "text",
+      "euvd": "description",
+      "match_type": "filtered_array_scalar",
+      "note": "CSAF stores the summary inside a notes array filtered by category. EUVD stores it as a direct string."
+    },
+    "title": {
+      "csaf": "document.title",
+      "euvd": "id",
+      "match_type": "scalar",
+      "note": "EUVD has no advisory title. The EUVD-ID is the closest equivalent for display purposes."
+    },
+    "severity_text": {
+      "csaf": "document.aggregate_severity.text",
+      "euvd": null,
+      "match_type": "scalar",
+      "note": "EUVD has no textual severity equivalent. Use baseScore thresholds to derive severity if needed."
     },
     "publication_date": {
       "csaf": "document.tracking.initial_release_date",
-      "euvd": "datePublished"
+      "euvd": "datePublished",
+      "match_type": "scalar"
     },
     "modification_date": {
       "csaf": "document.tracking.current_release_date",
-      "euvd": "dateUpdated"
+      "euvd": "dateUpdated",
+      "match_type": "scalar"
     },
     "source_identifier": {
       "csaf": "document.tracking.id",
-      "euvd": "id"
+      "euvd": "id",
+      "match_type": "scalar"
     },
     "exploitation_status": {
-      "csaf": "document.vulnerabilities.threats.details",
-      "euvd": "exploited_since"
+      "csaf": "vulnerabilities[].threats[].details",
+      "csaf_filter": "category == 'exploit_status'",
+      "euvd": "exploitedSince",
+      "match_type": "filtered_array_scalar",
+      "note": "CSAF uses a threats array with category filtering. EUVD uses a direct 'exploitedSince' date field (camelCase, raw API name)."
+    },
+    "epss_score": {
+      "csaf": null,
+      "euvd": "epss",
+      "match_type": "scalar",
+      "note": "EPSS is only available from EUVD. No CSAF equivalent."
+    },
+    "references": {
+      "csaf": "document.references[]",
+      "csaf_filter": "category == 'external'",
+      "csaf_field": "url",
+      "euvd": "references",
+      "match_type": "mixed",
+      "note": "CSAF: array of objects, filter by category='external', extract 'url'. EUVD: newline-separated string of URLs — split on '\\n' to get array."
+    },
+    "affected_os": {
+      "csaf": "document.notes[]",
+      "csaf_filter": "category == 'general'",
+      "csaf_field": "text",
+      "euvd": null,
+      "match_type": "filtered_array_scalar",
+      "note": "Affected OS is only available in CSAF (notes with category='general'). No EUVD equivalent."
     }
   }
 }

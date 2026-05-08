@@ -1,28 +1,36 @@
 {
   "config_type": "vendor_extraction_rules",
+  "version": "1.1",
   "extraction_paths": {
     "csaf": {
-      "path": "document.product_tree.branches",
+      "path": "product_tree.branches[]",
       "selector": { "category": "vendor" },
       "field": "name",
-      "note": "Identifies the vendor branch in the CSAF product tree."
+      "note": "Walk the top-level product_tree.branches array and select branches where category == 'vendor'. The 'name' field of that branch is the vendor name. product_tree is at the TOP LEVEL of the stored document, not under 'document'."
     },
     "euvd": {
-      "path": "enisaIdVendor",
+      "path": "enisaIdVendor[]",
       "field": "vendor.name",
-      "note": "Extracts the name from the nested vendor object of the EUVD."
+      "note": "Direct extraction from the enisaIdVendor array. Each entry has a nested vendor object with a name field."
     }
   },
   "normalization": {
     "strip_suffixes": [
-      " GmbH", " Inc.", " Corp.", " Corporation", " Ltd.", " Limited", 
-      " SE", " AG", " s.r.o.", " S.A.", " KGaA", " Co.", " KG", " LLC",
-      " electronics", " Software", " Solutions", " Systems"
+      " GmbH", " Inc.", " Inc", " Corp.", " Corp", " Corporation",
+      " Ltd.", " Ltd", " Limited", " SE", " AG", " s.r.o.", " S.A.",
+      " KGaA", " Co.", " Co", " KG", " LLC", " LLP", " PLC",
+      " electronics", " Software", " Solutions", " Systems", " Technologies",
+      " Technology", " International", " Holding", " Holdings", " Group"
     ],
     "formatting": {
       "trim_whitespace": true,
-      "remove_special_chars": true,
-      "case_handling": "proper_case"
+      "remove_special_chars": false,
+      "case_handling": "proper_case",
+      "note": "Do not remove special chars globally — vendor names like 'C++' or 'Node.js' contain meaningful special characters."
+    },
+    "vendor_in_product_name": {
+      "strategy": "csaf_branch_hierarchy",
+      "note": "In CSAF product trees, the vendor name appears as the parent branch (category='vendor') and the product name as a child branch (category='product_name'). The join pipeline should use this hierarchy rather than trying to strip vendor names from free-text product name strings. For EUVD, enisaIdVendor and enisaIdProduct are separate arrays and should be linked by matching array index or the shared 'id' field."
     }
   }
 }
