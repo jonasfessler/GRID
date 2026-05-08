@@ -1,56 +1,35 @@
 {
-  _id: ObjectId('69fbd5cdba07d6f795c48d20'),
-  euvd_id: 'EUVD-2026-28219',
-  aliases: 'CVE-2026-3291\n',
-  assigner: 'hp',
-  base_score: Double('6.9'),
-  base_score_vector: 'CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N',
-  base_score_version: '4.0',
-  cve_ids: [
-    'CVE-2026-3291'
+  _id: ObjectId('69fe6a91cae57419a4e731db'),
+  id: 'EUVD-2026-28819',
+  _date_updated_parsed: ISODate('2026-05-08T19:29:04.000Z'),
+  aliases: 'CVE-2026-42180\n',
+  assigner: 'GitHub_M',
+  baseScore: Double('6.3'),
+  baseScoreVector: 'CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L',
+  baseScoreVersion: '3.1',
+  datePublished: 'May 8, 2026, 7:29:04 PM',
+  dateUpdated: 'May 8, 2026, 7:29:04 PM',
+  description: 'Lemmy is a link aggregator and forum for the fediverse. Prior to version 0.19.18, Lemmy allows an authenticated low-privileged user to create a link post through POST /api/v3/post. When a post is created in a public community, the backend asynchronously sends a Webmention to the attacker-controlled link target. The submitted URL is checked for syntax and scheme, but the audited code path does not reject loopback, private, or link-local destinations before the Webmention request is issued. This lets a normal user trigger server-side HTTP requests toward internal services. This issue has been patched in version 0.19.18.',
+  enisaIdProduct: [
+    {
+      id: '0591a8ef-4915-34c6-bbcc-42300d60ccaa',
+      product: {
+        name: 'lemmy'
+      },
+      product_version: '< 0.19.18'
+    }
   ],
-  date_published: ISODate('2026-05-06T21:53:03.000Z'),
-  date_updated: ISODate('2026-05-06T21:53:03.000Z'),
-  description: 'Samsung Print Service Plugin for Android is potentially vulnerable to information disclosure when using an outdated version of the application via mobile devices. HP is releasing updates to mitigate these potential vulnerabilities.',
+  enisaIdVendor: [
+    {
+      id: '64de4dba-8b23-3a23-837c-b1da6866d4f1',
+      vendor: {
+        name: 'LemmyNet'
+      }
+    }
+  ],
+  enisaUuid: '014052ac-e936-364a-8a29-0f3fec25f914',
   epss: Double('0'),
-  exploited_since: null,
-  mirrored_at: ISODate('2026-05-06T23:59:09.155Z'),
-  product_ids: [
-    ObjectId('69fbd5cdba07d6f795c48ce8')
-  ],
-  raw: {
-    id: 'EUVD-2026-28219',
-    enisaUuid: '87463c7f-8b0f-373f-ac72-a19b62962b19',
-    description: 'Samsung Print Service Plugin for Android is potentially vulnerable to information disclosure when using an outdated version of the application via mobile devices. HP is releasing updates to mitigate these potential vulnerabilities.',
-    datePublished: 'May 6, 2026, 9:53:03 PM',
-    dateUpdated: 'May 6, 2026, 9:53:03 PM',
-    baseScore: Double('6.9'),
-    baseScoreVersion: '4.0',
-    baseScoreVector: 'CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N',
-    references: 'https://support.hp.com/us-en/document/ish_14864662-14864690-16/hpsbgn04093\n',
-    aliases: 'CVE-2026-3291\n',
-    assigner: 'hp',
-    epss: Double('0'),
-    enisaIdProduct: [
-      {
-        id: '7bba8622-82d7-300f-be2a-8cee02709e36',
-        product: {
-          name: 'Samsung Print Service Plugin'
-        },
-        product_version: '0 <<3.12.260420'
-      }
-    ],
-    enisaIdVendor: [
-      {
-        id: 'b23a9170-3568-3dac-a9f8-0e79d8058428',
-        vendor: {
-          name: 'HP, Inc'
-        }
-      }
-    ]
-  },
-  references: 'https://support.hp.com/us-en/document/ish_14864662-14864690-16/hpsbgn04093\n',
-  vendor_ids: [
-    ObjectId('69fbd5cdba07d6f795c48c6e')
-  ]
+  mirrored_at: ISODate('2026-05-08T22:58:25.009Z'),
+  references: 'https://github.com/LemmyNet/lemmy/security/advisories/GHSA-3jvj-v6w2-h948\nhttps://github.com/LemmyNet/lemmy/releases/tag/0.19.18\n',
+  source_url: 'https://euvdservices.enisa.europa.eu/api/search?size=100&page=0'
 }

@@ -1,64 +1,143 @@
 {
-  _id: ObjectId('69fe53e3cae57419a4e2d603'),
-  tracking: {
-    current_release_date: '2026-05-07T22:00:00.000+00:00',
-    generator: {
-      date: '2026-05-08T11:40:58.435+00:00',
-      engine: {
-        name: 'BSI-WID',
-        version: '1.5.0'
+  _id: ObjectId('69fe6604cae57419a4e699c4'),
+  document: {
+    aggregate_severity: {
+      text: 'hoch'
+    },
+    category: 'csaf_base',
+    csaf_version: '2.0',
+    distribution: {
+      tlp: {
+        label: 'WHITE',
+        url: 'https://www.first.org/tlp/'
       }
     },
-    id: 'WID-SEC-W-2026-1438',
-    initial_release_date: '2026-05-07T22:00:00.000+00:00',
-    revision_history: [
+    lang: 'de-DE',
+    notes: [
       {
-        date: '2026-05-07T22:00:00.000+00:00',
-        number: '1',
-        summary: 'Initiale Fassung'
+        category: 'legal_disclaimer',
+        text: 'Das BSI ist als Anbieter für die eigenen, zur Nutzung bereitgestellten Inhalte nach den allgemeinen Gesetzen verantwortlich. Nutzerinnen und Nutzer sind jedoch dafür verantwortlich, die Verwendung und/oder die Umsetzung der mit den Inhalten bereitgestellten Informationen sorgfältig im Einzelfall zu prüfen.'
+      },
+      {
+        category: 'description',
+        text: 'Apache CloudStack ist eine Sofwareplattform zum Verwalten großer Netzwerke von virtuellen Maschienen als eine hoch verfügbare, hoch skalierbare Infrastructure as a Service (IaaS) Cloud Computing Plattform. CloudStack wurde von Citrix entwicklet und anschließend über Apache als Open Source Software zur Verfügung gestellt.',
+        title: 'Produktbeschreibung'
+      },
+      {
+        category: 'summary',
+        text: 'Ein Angreifer kann mehrere Schwachstellen in Apache CloudStack ausnutzen, um beliebigen Programmcode auszuführen, um Sicherheitsvorkehrungen zu umgehen, um einen Denial of Service Angriff durchzuführen, und um Dateien zu Manipulieren.',
+        title: 'Angriff'
+      },
+      {
+        category: 'general',
+        text: '- Linux\n- UNIX',
+        title: 'Betroffene Betriebssysteme'
       }
     ],
-    status: 'final',
-    version: '1'
-  },
-  affected_versions: [
-    {
-      product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-      version: 'LTS <4.20.3.0',
-      cpe: '',
-      is_fixed: false,
-      csaf_pid: 'T053720'
+    publisher: {
+      category: 'other',
+      contact_details: 'csaf-provider@cert-bund.de',
+      name: 'Bundesamt für Sicherheit in der Informationstechnik',
+      namespace: 'https://www.bsi.bund.de'
     },
-    {
-      product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-      version: 'LTS 4.20.3.0',
-      cpe: 'cpe:/a:apache:cloudstack:lts__4.20.3.0',
-      is_fixed: true,
-      csaf_pid: 'T053720-fixed'
-    },
-    {
-      product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-      version: 'LTS <4.22.0.1',
-      cpe: '',
-      is_fixed: false,
-      csaf_pid: 'T053721'
-    },
-    {
-      product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-      version: 'LTS 4.22.0.1',
-      cpe: 'cpe:/a:apache:cloudstack:lts__4.22.0.1',
-      is_fixed: true,
-      csaf_pid: 'T053721-fixed'
+    references: [
+      {
+        category: 'self',
+        summary: 'WID-SEC-W-2026-1438 - CSAF Version',
+        url: 'https://wid.cert-bund.de/.well-known/csaf/white/2026/wid-sec-w-2026-1438.json'
+      },
+      {
+        category: 'self',
+        summary: 'WID-SEC-2026-1438 - Portal Version',
+        url: 'https://wid.cert-bund.de/portal/wid/securityadvisory?name=WID-SEC-2026-1438'
+      },
+      {
+        category: 'external',
+        summary: 'Apache CloudStack LTS Security Release vom 2026-05-07',
+        url: 'https://cloudstack.apache.org/blog/security-release-advisory-4.20.3.0-4.22.0.1'
+      }
+    ],
+    source_lang: 'en-US',
+    title: 'Apache CloudStack: Mehrere Schwachstellen',
+    tracking: {
+      current_release_date: '2026-05-07T22:00:00.000+00:00',
+      generator: {
+        date: '2026-05-08T11:40:58.435+00:00',
+        engine: {
+          name: 'BSI-WID',
+          version: '1.5.0'
+        }
+      },
+      id: 'WID-SEC-W-2026-1438',
+      initial_release_date: '2026-05-07T22:00:00.000+00:00',
+      revision_history: [
+        {
+          date: '2026-05-07T22:00:00.000+00:00',
+          number: '1',
+          summary: 'Initiale Fassung'
+        }
+      ],
+      status: 'final',
+      version: '1'
     }
-  ],
-  last_imported_at: ISODate('2026-05-08T21:21:39.386Z'),
-  product_ids: [
-    ObjectId('69fe53e3cae57419a4e2d5fb')
-  ],
-  status: 'raw',
-  summary: 'Ein Angreifer kann mehrere Schwachstellen in Apache CloudStack ausnutzen, um beliebigen Programmcode auszuführen, um Sicherheitsvorkehrungen zu umgehen, um einen Denial of Service Angriff durchzuführen, und um Dateien zu Manipulieren.',
-  title: 'Apache CloudStack: Mehrere Schwachstellen',
-  vulnerabilities_enriched: [
+  },
+  mirrored_at: ISODate('2026-05-08T22:39:00.586Z'),
+  product_tree: {
+    branches: [
+      {
+        branches: [
+          {
+            branches: [
+              {
+                category: 'product_version_range',
+                name: 'LTS <4.20.3.0',
+                product: {
+                  name: 'Apache CloudStack LTS <4.20.3.0',
+                  product_id: 'T053720'
+                }
+              },
+              {
+                category: 'product_version',
+                name: 'LTS 4.20.3.0',
+                product: {
+                  name: 'Apache CloudStack LTS 4.20.3.0',
+                  product_id: 'T053720-fixed',
+                  product_identification_helper: {
+                    cpe: 'cpe:/a:apache:cloudstack:lts__4.20.3.0'
+                  }
+                }
+              },
+              {
+                category: 'product_version_range',
+                name: 'LTS <4.22.0.1',
+                product: {
+                  name: 'Apache CloudStack LTS <4.22.0.1',
+                  product_id: 'T053721'
+                }
+              },
+              {
+                category: 'product_version',
+                name: 'LTS 4.22.0.1',
+                product: {
+                  name: 'Apache CloudStack LTS 4.22.0.1',
+                  product_id: 'T053721-fixed',
+                  product_identification_helper: {
+                    cpe: 'cpe:/a:apache:cloudstack:lts__4.22.0.1'
+                  }
+                }
+              }
+            ],
+            category: 'product_name',
+            name: 'CloudStack'
+          }
+        ],
+        category: 'vendor',
+        name: 'Apache'
+      }
+    ]
+  },
+  source_url: 'https://wid.cert-bund.de/.well-known/csaf/white/2026/wid-sec-w-2026-1438.json',
+  vulnerabilities: [
     {
       cve: 'CVE-2025-66170',
       product_status: {
@@ -68,21 +147,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2025-66170',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2025-66170'
     },
     {
       cve: 'CVE-2025-66171',
@@ -93,21 +158,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2025-66171',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2025-66171'
     },
     {
       cve: 'CVE-2025-66172',
@@ -118,21 +169,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2025-66172',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2025-66172'
     },
     {
       cve: 'CVE-2025-66467',
@@ -143,21 +180,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2025-66467',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2025-66467'
     },
     {
       cve: 'CVE-2025-69233',
@@ -168,21 +191,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2025-69233',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2025-69233'
     },
     {
       cve: 'CVE-2026-25077',
@@ -193,21 +202,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2026-25077',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2026-25077'
     },
     {
       cve: 'CVE-2026-25199',
@@ -218,21 +213,7 @@
         ]
       },
       release_date: '2026-05-07T22:00:00.000+00:00',
-      title: 'CVE-2026-25199',
-      product_status_enriched: {
-        known_affected: [
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.22.0.1',
-            cpe: ''
-          },
-          {
-            product_id: ObjectId('69fe53e3cae57419a4e2d5fb'),
-            version: 'LTS <4.20.3.0',
-            cpe: ''
-          }
-        ]
-      }
+      title: 'CVE-2026-25199'
     }
   ]
 }
