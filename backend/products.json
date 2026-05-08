@@ -1,0 +1,23 @@
+{
+  "config_type": "product_extraction_rules",
+  "extraction_paths": {
+    "csaf": {
+      "path": "document.product_tree.branches",
+      "sub_selector": { "category": "product_name" },
+      "field": "name",
+      "note": "Searches within the vendor branches for the specific product names."
+    },
+    "euvd": {
+      "path": "enisaIdProduct",
+      "field": "product.name",
+      "note": "Direct path to the product name in the EUVD structure."
+    }
+  },
+  "normalization": {
+    "clean_patterns": [
+      " version ", " v.", " ver. ", " Release ", " Edition ", " Build "
+    ],
+    "strip_vendor_prefix": true,
+    "note": "Removes the manufacturer name from the product name (e.g., 'Adobe Acrobat' -> 'Acrobat')."
+  }
+}

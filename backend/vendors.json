@@ -1,0 +1,28 @@
+{
+  "config_type": "vendor_extraction_rules",
+  "extraction_paths": {
+    "csaf": {
+      "path": "document.product_tree.branches",
+      "selector": { "category": "vendor" },
+      "field": "name",
+      "note": "Identifies the vendor branch in the CSAF product tree."
+    },
+    "euvd": {
+      "path": "enisaIdVendor",
+      "field": "vendor.name",
+      "note": "Extracts the name from the nested vendor object of the EUVD."
+    }
+  },
+  "normalization": {
+    "strip_suffixes": [
+      " GmbH", " Inc.", " Corp.", " Corporation", " Ltd.", " Limited", 
+      " SE", " AG", " s.r.o.", " S.A.", " KGaA", " Co.", " KG", " LLC",
+      " electronics", " Software", " Solutions", " Systems"
+    ],
+    "formatting": {
+      "trim_whitespace": true,
+      "remove_special_chars": true,
+      "case_handling": "proper_case"
+    }
+  }
+}
