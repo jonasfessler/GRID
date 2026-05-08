@@ -1,0 +1,41 @@
+{
+  "mapping_name": "GRID-Raw-Equivalence-Map",
+  "version": "1.1",
+  "join_logic": {
+    "primary_key": {
+      "csaf_path": "vulnerabilities.cve",
+      "euvd_path": "cve_ids",
+      "description": "Join takes place if a value from the CSAF-CVE field exists in the EUVD-CVE array. Else the CVEs are treated as separate vulnerabilities"
+    }
+  },
+  "equivalent_fields": {
+    "cvss_base_score": {
+      "csaf": "vulnerabilities.scores.cvss_v3.base_score",
+      "euvd": "base_score"
+    },
+    "cvss_vector": {
+      "csaf": "vulnerabilities.scores.cvss_v3.vector_string",
+      "euvd": "base_score_vector"
+    },
+    "summary_text": {
+      "csaf": "vulnerabilities.title",
+      "euvd": "description"
+    },
+    "publication_date": {
+      "csaf": "tracking.initial_release_date",
+      "euvd": "date_published"
+    },
+    "modification_date": {
+      "csaf": "tracking.current_release_date",
+      "euvd": "date_updated"
+    },
+    "source_identifier": {
+      "csaf": "tracking.id",
+      "euvd": "euvd_id"
+    },
+    "exploitation_status": {
+      "csaf": "vulnerabilities.threats.details",
+      "euvd": "exploited_since"
+    }
+  }
+}
