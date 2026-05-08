@@ -1,40 +1,45 @@
 {
-  "mapping_name": "GRID-Raw-Equivalence-Map",
-  "version": "1.1",
+  "mapping_definition": {
+    "name": "GRID-Raw-Equivalence-Map",
+    "version": "1.2",
+    "description": "Precise Path Definition based on BSI-CSAF and ENISA-EUVD Raw Data"
+  },
   "join_logic": {
     "primary_key": {
-      "csaf_path": "vulnerabilities.cve",
+      "csaf_path": "document.vulnerabilities.cve",
       "euvd_path": "cve_ids",
-      "description": "Join takes place if a value from the CSAF-CVE field exists in the EUVD-CVE array. Else the CVEs are treated as separate vulnerabilities"
+      "match_type": "array_lookup",
+      "note": "CSAF uses an array under document.vulnerabilities; EUVD uses the cve_ids array created by the ingester."
     }
   },
   "equivalent_fields": {
     "cvss_base_score": {
-      "csaf": "vulnerabilities.scores.cvss_v3.base_score",
-      "euvd": "base_score"
+      "csaf": "document.vulnerabilities.scores.cvss_v3.base_score",
+      "euvd": "baseScore"
     },
     "cvss_vector": {
-      "csaf": "vulnerabilities.scores.cvss_v3.vector_string",
-      "euvd": "base_score_vector"
+      "csaf": "document.vulnerabilities.scores.cvss_v3.vector_string",
+      "euvd": "baseScoreVector"
     },
     "summary_text": {
-      "csaf": "vulnerabilities.title",
+      "csaf": "document.notes", 
+      "csaf_filter": "category == 'summary'",
       "euvd": "description"
     },
     "publication_date": {
-      "csaf": "tracking.initial_release_date",
-      "euvd": "date_published"
+      "csaf": "document.tracking.initial_release_date",
+      "euvd": "datePublished"
     },
     "modification_date": {
-      "csaf": "tracking.current_release_date",
-      "euvd": "date_updated"
+      "csaf": "document.tracking.current_release_date",
+      "euvd": "dateUpdated"
     },
     "source_identifier": {
-      "csaf": "tracking.id",
-      "euvd": "euvd_id"
+      "csaf": "document.tracking.id",
+      "euvd": "id"
     },
     "exploitation_status": {
-      "csaf": "vulnerabilities.threats.details",
+      "csaf": "document.vulnerabilities.threats.details",
       "euvd": "exploited_since"
     }
   }
