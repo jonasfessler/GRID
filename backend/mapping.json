@@ -22,7 +22,7 @@
       "euvd": "baseScoreVector"
     },
     "summary_text": {
-      "csaf": "document.notes", 
+      "csaf": "document.notes",
       "csaf_filter": "category == 'summary'",
       "euvd": "description"
     },
