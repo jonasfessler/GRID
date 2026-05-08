@@ -1,0 +1,14 @@
+{
+  _id: ObjectId('69fe75f9cae57419a4ea6402'),
+  name: 'Dell',
+  created_at: ISODate('2026-05-08T23:47:05.564Z'),
+  raw_names: [
+    'Dell',
+    'Dell Inc.'
+  ],
+  sources: [
+    'csaf',
+    'euvd'
+  ],
+  updated_at: ISODate('2026-05-08T23:52:46.730Z')
+}

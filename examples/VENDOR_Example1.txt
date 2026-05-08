@@ -1,0 +1,13 @@
+{
+  _id: ObjectId('69fe75f9cae57419a4ea63b3'),
+  name: 'Apache',
+  created_at: ISODate('2026-05-08T23:47:05.549Z'),
+  raw_names: [
+    'Apache'
+  ],
+  sources: [
+    'csaf',
+    'euvd'
+  ],
+  updated_at: ISODate('2026-05-08T23:49:31.364Z')
+}
