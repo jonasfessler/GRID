@@ -93,6 +93,21 @@ REMEDIATION_STATUS_MAP = {
     "none_available":  "No fix available",
 }
 
+# CERT-BUND aggregate_severity.text → estimated numeric CVSS midpoint
+# Used as last-resort fallback when no per-CVE CVSS score is available
+# from either CSAF scores[] or EUVD baseScore.
+SEVERITY_TEXT_SCORE_MAP: dict[str, float] = {
+    "kritisch": 9.5,
+    "hoch":     7.5,
+    "mittel":   5.0,
+    "niedrig":  2.0,
+    "info":     0.0,
+    "critical": 9.5,
+    "high":     7.5,
+    "medium":   5.0,
+    "low":      2.0,
+}
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -515,19 +530,42 @@ async def build_advisory(
     tracking  = doc_meta.get("tracking", {})
     now       = datetime.now(UTC)
 
-    # --- CVSS (CERT-BUND primary, EUVD fallback) ---
-    cvss_data = extract_cvss(vuln)
-    cvss_v3: dict | None = None
+    # --- CVSS (3-tier priority) ---
+    # Tier 1: CSAF scores[] — per-CVE, most accurate
+    # Tier 2: EUVD baseScore — per-CVE, reliable
+    # Tier 3: CERT-BUND aggregate_severity.text → estimated numeric midpoint
+    cvss_data      = extract_cvss(vuln)
+    cvss_v3:        dict | None = None
+    cvss_estimated: bool        = False
+
     if cvss_data and cvss_data.get("base_score") is not None:
         cvss_v3 = cvss_data
+
     elif euvd_doc:
         score = euvd_doc.get("baseScore")
         if score is not None:
             cvss_v3 = {
-                "base_score": score,
+                "base_score": float(score),
                 "vector":     euvd_doc.get("baseScoreVector"),
                 "version":    euvd_doc.get("baseScoreVersion"),
             }
+
+    # Tier 3 — aggregate_severity.text fallback
+    severity_raw  = doc_meta.get("aggregate_severity", {}).get("text", "").strip()
+    severity_text = severity_raw or None
+    if cvss_v3 is None and severity_raw:
+        estimated_score = SEVERITY_TEXT_SCORE_MAP.get(severity_raw.lower())
+        if estimated_score is not None:
+            cvss_v3 = {
+                "base_score": estimated_score,
+                "vector":     None,
+                "version":    None,
+            }
+            cvss_estimated = True
+            logger.debug(
+                f"  [CVSS FALLBACK] {vuln.get('cve')} — using severity_text "
+                f"'{severity_raw}' → estimated score {estimated_score}"
+            )
 
     # --- Exploitation status (CERT-BUND primary, EUVD fallback) ---
     exploitation = extract_exploitation_status(vuln)
@@ -620,8 +658,10 @@ async def build_advisory(
         "title":       doc_meta.get("title", ""),
         "description": description,
         "metrics": {
-            "cvss_v3":            cvss_v3,
-            "epss":               epss,
+            "cvss_v3":             cvss_v3,
+            "cvss_estimated":      cvss_estimated,
+            "severity_text":       severity_text,
+            "epss":                epss,
             "exploitation_status": exploitation,
         },
         "infrastructure": {
@@ -648,18 +688,29 @@ async def build_advisory(
 # EUVD Lookup
 # ---------------------------------------------------------------------------
 
-async def lookup_euvd(db_gridr, cve_id: str) -> dict | None:
+async def bulk_lookup_euvd(db_gridr, cve_ids: list[str]) -> dict[str, dict]:
     """
-    Searches GRIDr/euvd for a document whose aliases field contains the CVE-ID.
-    Uses a regex query as defined in mapping.json.
+    Bulk-fetches EUVD documents for a list of CVE-IDs in a single query.
+
+    Uses the _cve_ids multikey index (populated at ingest time by euvd-raw.py)
+    instead of per-CVE regex scans. Returns a mapping of {cve_id: euvd_doc}
+    for O(1) access inside the vulnerability loop.
+
+    If a single EUVD document covers multiple CVEs (multi-alias entries), it
+    is registered once per CVE-ID it covers from the requested list.
     """
+    if not cve_ids:
+        return {}
+    cve_map: dict[str, dict] = {}
     try:
-        return await db_gridr[COLL_EUVD].find_one(
-            {"aliases": {"$regex": re.escape(cve_id), "$options": "i"}},
-        )
+        cursor = db_gridr[COLL_EUVD].find({"_cve_ids": {"$in": cve_ids}})
+        async for doc in cursor:
+            for cid in (doc.get("_cve_ids") or []):
+                if cid in cve_ids and cid not in cve_map:
+                    cve_map[cid] = doc
     except PyMongoError as exc:
-        logger.warning(f"  [EUVD LOOKUP FAILED] {cve_id}: {exc}")
-        return None
+        logger.warning(f"  [EUVD BULK LOOKUP FAILED]: {exc}")
+    return cve_map
 
 # ---------------------------------------------------------------------------
 # Main Processing Loop
@@ -676,11 +727,25 @@ async def process_csaf_document(
     Processes one CERT-BUND advisory: iterates over vulnerabilities[],
     joins each CVE with EUVD, builds an advisory document, and upserts it.
 
+    EUVD lookup is performed once per document (bulk $in query against the
+    _cve_ids shadow index) rather than once per CVE (per-loop regex query).
+
     Returns the number of CVE documents successfully upserted.
     """
-    pid_map     = build_product_id_map(csaf_doc)
-    vulns       = csaf_doc.get("vulnerabilities", [])
-    upserted    = 0
+    pid_map  = build_product_id_map(csaf_doc)
+    vulns    = csaf_doc.get("vulnerabilities", []) or []
+    upserted = 0
+
+    # --- Pre-flight: collect all CVE IDs from this advisory -----------------
+    all_cve_ids = [
+        cve_id
+        for vuln in vulns
+        if (cve_id := (vuln.get("cve") or "").strip())
+    ]
+
+    # --- Single bulk query: fetch all matching EUVD docs at once ------------
+    # Returns {cve_id: euvd_doc}. One DB round-trip regardless of advisory size.
+    euvd_map = await bulk_lookup_euvd(db_gridr, all_cve_ids)
 
     for vuln in vulns:
         cve_id = (vuln.get("cve") or "").strip()
@@ -688,7 +753,7 @@ async def process_csaf_document(
             continue
 
         try:
-            euvd_doc = await lookup_euvd(db_gridr, cve_id)
+            euvd_doc = euvd_map.get(cve_id)  # O(1) dict lookup
 
             advisory = await build_advisory(
                 cve_id=cve_id,
