@@ -1,0 +1,106 @@
+{
+  _id: ObjectId('69fe8b71cae57419a40820dd'),
+  cve_id: 'CVE-2025-66170',
+  description: 'Ein Angreifer kann mehrere Schwachstellen in Apache CloudStack ausnutzen, um beliebigen Programmcode auszuführen, um Sicherheitsvorkehrungen zu umgehen, um einen Denial of Service Angriff durchzuführen, und um Dateien zu Manipulieren.',
+  infrastructure: {
+    affected_os: [
+      'Linux',
+      'UNIX'
+    ],
+    affected_versions: [
+      {
+        vendor: 'Apache',
+        product: 'CloudStack',
+        version: 'LTS <4.22.0.1',
+        is_range: true,
+        status: 'affected',
+        cpe: '',
+        source: 'csaf'
+      },
+      {
+        vendor: 'Apache',
+        product: 'CloudStack',
+        version: 'LTS 4.22.0.1',
+        is_range: false,
+        status: 'fixed',
+        cpe: 'cpe:/a:apache:cloudstack:lts__4.22.0.1',
+        source: 'csaf'
+      },
+      {
+        vendor: 'Apache',
+        product: 'CloudStack',
+        version: 'LTS <4.20.3.0',
+        is_range: true,
+        status: 'affected',
+        cpe: '',
+        source: 'csaf'
+      },
+      {
+        vendor: 'Apache',
+        product: 'CloudStack',
+        version: 'LTS 4.20.3.0',
+        is_range: false,
+        status: 'fixed',
+        cpe: 'cpe:/a:apache:cloudstack:lts__4.20.3.0',
+        source: 'csaf'
+      },
+      {
+        vendor: '',
+        product: 'Apache CloudStack',
+        version: '4.21.0.0 ≤4.22.0.0',
+        is_range: false,
+        status: 'affected',
+        cpe: '',
+        source: 'euvd'
+      }
+    ],
+    links: [
+      {
+        vendor_id: ObjectId('69fe75f9cae57419a4ea63b3'),
+        product_id: ObjectId('69fe7670cae57419a4ec6a98')
+      }
+    ]
+  },
+  intel: {
+    references: [
+      'https://cloudstack.apache.org/blog/security-release-advisory-4.20.3.0-4.22.0.1',
+      'https://lists.apache.org/thread/n8mt5b7wkpysstb8w7rr9f02kc5cq2xm',
+      'https://nvd.nist.gov/vuln/detail/CVE-2025-66170',
+      'https://wid.cert-bund.de/.well-known/csaf/white/2026/wid-sec-w-2026-1438.json',
+      'https://wid.cert-bund.de/portal/wid/securityadvisory?name=WID-SEC-2026-1438'
+    ]
+  },
+  metadata: {
+    sources: [
+      'csaf',
+      'euvd'
+    ],
+    raw_source_ids: {
+      cert_bund: 'WID-SEC-W-2026-1438',
+      euvd: 'EUVD-2025-209740'
+    },
+    last_processed: ISODate('2026-05-09T01:18:41.857Z')
+  },
+  metrics: {
+    cvss_v3: {
+      base_score: Double('0'),
+      vector: null,
+      version: null
+    },
+    epss: Double('0'),
+    exploitation_status: null
+  },
+  remediation: {
+    status: 'Patch available',
+    details: null,
+    fixed_versions: [
+      'LTS 4.22.0.1',
+      'LTS 4.20.3.0'
+    ]
+  },
+  timeline: {
+    published_at: '2026-05-07T22:00:00.000+00:00',
+    modified_at: '2026-05-07T22:00:00.000+00:00'
+  },
+  title: 'Apache CloudStack: Mehrere Schwachstellen'
+}

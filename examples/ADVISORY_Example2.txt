@@ -1,0 +1,124 @@
+{
+  _id: ObjectId('69fe8b74cae57419a408220e'),
+  cve_id: 'CVE-2026-41240',
+  description: 'Ein Angreifer kann mehrere Schwachstellen in IBM App Connect Enterprise Certified Container ausnutzen, um beliebigen Code auszuführen, Sicherheitsmaßnahmen zu umgehen, Cross-Site-Scripting-Angriffe durchzuführen, Daten zu manipulieren, vertrauliche Informationen offenzulegen oder einen Denial-of-Service-Zustand zu verursachen.',
+  infrastructure: {
+    affected_os: [
+      'Sonstiges',
+      'UNIX',
+      'Windows'
+    ],
+    affected_versions: [
+      {
+        vendor: 'IBM',
+        product: 'App Connect Enterprise',
+        version: 'Certified Container Operator <12.0.23',
+        is_range: true,
+        status: 'affected',
+        cpe: '',
+        source: 'csaf'
+      },
+      {
+        vendor: 'IBM',
+        product: 'App Connect Enterprise',
+        version: 'Certified Container Operator 12.0.23',
+        is_range: false,
+        status: 'fixed',
+        cpe: 'cpe:/a:ibm:app_connect_enterprise:certified_container_operator__12.0.23',
+        source: 'csaf'
+      },
+      {
+        vendor: 'IBM',
+        product: 'App Connect Enterprise',
+        version: 'Certified Container Operator <13.1.0',
+        is_range: true,
+        status: 'affected',
+        cpe: '',
+        source: 'csaf'
+      },
+      {
+        vendor: 'IBM',
+        product: 'App Connect Enterprise',
+        version: 'Certified Container Operator 13.1.0',
+        is_range: false,
+        status: 'fixed',
+        cpe: 'cpe:/a:ibm:app_connect_enterprise:certified_container_operator__13.1.0',
+        source: 'csaf'
+      },
+      {
+        vendor: 'Fedora',
+        product: 'Fedora Linux',
+        version: 'Fedora Linux',
+        is_range: false,
+        status: 'affected',
+        cpe: 'cpe:/o:fedoraproject:fedora:-',
+        source: 'csaf'
+      },
+      {
+        vendor: '',
+        product: 'DOMPurify',
+        version: '< 3.4.0',
+        is_range: true,
+        status: 'affected',
+        cpe: '',
+        source: 'euvd'
+      }
+    ],
+    links: [
+      {
+        vendor_id: ObjectId('69fe75f9cae57419a4ea63bd'),
+        product_id: ObjectId('69fe7670cae57419a4ec6ab8')
+      },
+      {
+        vendor_id: ObjectId('69fe75f9cae57419a4ea63d1'),
+        product_id: ObjectId('69fe7670cae57419a4ec6ad0')
+      }
+    ]
+  },
+  intel: {
+    references: [
+      'https://bodhi.fedoraproject.org/updates/FEDORA-2026-85b819b928',
+      'https://github.com/cure53/DOMPurify/commit/c361baa18dbdcb3344a41110f4c48ad85bf48f80',
+      'https://github.com/cure53/DOMPurify/releases/tag/3.4.0',
+      'https://github.com/cure53/DOMPurify/security/advisories/GHSA-h7mw-gpvr-xq4m',
+      'https://wid.cert-bund.de/.well-known/csaf/white/2026/wid-sec-w-2026-1407.json',
+      'https://wid.cert-bund.de/portal/wid/securityadvisory?name=WID-SEC-2026-1407',
+      'https://www.ibm.com/support/pages/node/7271907',
+      'https://www.ibm.com/support/pages/node/7271908',
+      'https://www.ibm.com/support/pages/node/7271910'
+    ]
+  },
+  metadata: {
+    sources: [
+      'csaf',
+      'euvd'
+    ],
+    raw_source_ids: {
+      cert_bund: 'WID-SEC-W-2026-1407',
+      euvd: 'EUVD-2026-25238'
+    },
+    last_processed: ISODate('2026-05-09T01:18:44.144Z')
+  },
+  metrics: {
+    cvss_v3: {
+      base_score: Double('6'),
+      vector: 'CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:P/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N',
+      version: '4.0'
+    },
+    epss: Double('0.04'),
+    exploitation_status: null
+  },
+  remediation: {
+    status: 'Patch available',
+    details: null,
+    fixed_versions: [
+      'Certified Container Operator 12.0.23',
+      'Certified Container Operator 13.1.0'
+    ]
+  },
+  timeline: {
+    published_at: '2026-05-06T22:00:00.000+00:00',
+    modified_at: '2026-05-07T22:00:00.000+00:00'
+  },
+  title: 'IBM App Connect Enterprise Certified Container: Mehrere Schwachstellen'
+}
