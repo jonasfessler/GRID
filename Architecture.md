@@ -92,3 +92,144 @@ GRIDd/
 ├── vendors/ (contains vendor data)
 └── metadata/ (contains metadata about the ingest process, e.g. timestamps, last ingest ID, successful/unsuccessful ingest flags, error logs, etc.)
 ```
+
+## GRIDd Collection Schemas:
+
+The following shows the actual document structure stored in each GRIDd collection.
+These are produced by the processing pipeline (`vendors.py`, `products.py`, `join.py`).
+
+### GRIDd / vendors
+
+```json
+{
+  "_id":       "ObjectId",
+  "name":      "Apache",
+  "raw_names": ["Apache"],
+  "sources":   ["csaf", "euvd"],
+  "created_at": "ISODate",
+  "updated_at": "ISODate"
+}
+```
+
+| Field | Description |
+|---|---|
+| `name` | Normalized canonical vendor name (unique index) |
+| `raw_names` | All raw name variants seen across source documents |
+| `sources` | Which ingest sources contributed (`csaf`, `euvd`) |
+
+---
+
+### GRIDd / products
+
+```json
+{
+  "_id":         "ObjectId",
+  "name":        "Cloudstack",
+  "vendor_id":   "ObjectId → vendors._id",
+  "vendor_name": "Apache",
+  "raw_names":   ["CloudStack", "Apache CloudStack"],
+  "versions": [
+    { "version_string": "LTS <4.20.3.0", "is_range": true,  "cpe": "" },
+    { "version_string": "LTS 4.20.3.0",  "is_range": false, "cpe": "cpe:/a:apache:cloudstack:lts__4.20.3.0" }
+  ],
+  "sources":    ["csaf"],
+  "created_at": "ISODate",
+  "updated_at": "ISODate"
+}
+```
+
+| Field | Description |
+|---|---|
+| `name` | Normalized product name (unique per vendor) |
+| `vendor_id` | FK → `GRIDd/vendors._id` |
+| `vendor_name` | Denormalized for efficient querying |
+| `versions` | All known version strings with CPE and range flag |
+| `sources` | Which ingest sources contributed |
+
+---
+
+### GRIDd / advisories
+
+```json
+{
+  "_id":         "ObjectId",
+  "cve_id":      "CVE-2026-12345",
+  "title":       "Apache CloudStack: Mehrere Schwachstellen",
+  "description": "Summary text from CERT-BUND (falls back to EUVD description).",
+
+  "metrics": {
+    "cvss_v3": {
+      "base_score": 9.8,
+      "vector":     "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "version":    "3.1"
+    },
+    "epss":               0.9412,
+    "exploitation_status": "Exploited since 2026-01-15"
+  },
+
+  "infrastructure": {
+    "affected_os": ["Linux", "UNIX"],
+    "affected_versions": [
+      {
+        "vendor":   "Apache",
+        "product":  "CloudStack",
+        "version":  "LTS <4.20.3.0",
+        "is_range": true,
+        "status":   "affected",
+        "cpe":      "",
+        "source":   "csaf"
+      },
+      {
+        "vendor":   "Apache",
+        "product":  "CloudStack",
+        "version":  "LTS 4.20.3.0",
+        "is_range": false,
+        "status":   "fixed",
+        "cpe":      "cpe:/a:apache:cloudstack:lts__4.20.3.0",
+        "source":   "csaf"
+      }
+    ],
+    "links": [
+      { "vendor_id": "ObjectId → vendors._id", "product_id": "ObjectId → products._id" }
+    ]
+  },
+
+  "remediation": {
+    "status":         "Patch available",
+    "details":        "Update to version 4.20.3.0 or later.",
+    "fixed_versions": ["LTS 4.20.3.0", "LTS 4.22.0.1"]
+  },
+
+  "timeline": {
+    "published_at": "2026-05-07T22:00:00Z",
+    "modified_at":  "2026-05-08T11:40:00Z"
+  },
+
+  "intel": {
+    "references": [
+      "https://wid.cert-bund.de/portal/wid/securityadvisory?name=WID-SEC-2026-1438",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-12345"
+    ]
+  },
+
+  "metadata": {
+    "sources":        ["csaf", "euvd"],
+    "raw_source_ids": {
+      "cert_bund": "WID-SEC-W-2026-1438",
+      "euvd":      "EUVD-2026-28582"
+    },
+    "last_processed": "ISODate"
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `cve_id` | Unique index — one document per CVE across all sources |
+| `metrics.cvss_v3` | CERT-BUND primary; EUVD fallback if CSAF has no score |
+| `metrics.epss` | EUVD only (EPSS probability score) |
+| `infrastructure.affected_versions` | All affected + fixed version entries; `status` ∈ `{affected, fixed, last_affected, not_affected}` |
+| `infrastructure.links` | ObjectId FKs into `GRIDd/vendors` and `GRIDd/products` |
+| `remediation.fixed_versions` | Flat list of fixed version strings (derived from `affected_versions`) |
+| `metadata.raw_source_ids` | Traceability back to original GRIDr documents |
+
