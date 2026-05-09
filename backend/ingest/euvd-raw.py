@@ -246,10 +246,34 @@ async def _save_last_run(db, completed_at: datetime, stats: dict) -> None:
 # Index Setup
 # ---------------------------------------------------------------------------
 
+# CVE-ID prefix used to filter valid entries from the aliases string
+_CVE_PREFIX = "CVE-"
+
+
+def _extract_cve_ids(aliases_raw: str | None) -> list[str]:
+    """
+    Parses the EUVD aliases string (whitespace/newline-separated) and returns
+    only tokens that look like CVE-IDs (e.g. 'CVE-2024-12345').
+
+    This list is stored as _cve_ids for shadow-index lookups in join.py.
+    The original aliases field is never modified (zero-processing rule).
+    """
+    if not aliases_raw:
+        return []
+    return [
+        token
+        for raw in aliases_raw.split()
+        if (token := raw.strip()) and token.upper().startswith(_CVE_PREFIX)
+    ]
+
+
 async def ensure_indexes(db) -> None:
     await db[COLL_NAME].create_index("id", unique=True)
     await db[COLL_NAME].create_index("_date_updated_parsed")
-    logger.info("Indexes on 'id' and '_date_updated_parsed' verified.")
+    # Multikey index: each element of _cve_ids gets its own index entry,
+    # enabling O(log n) $in lookups from join.py without regex scans.
+    await db[COLL_NAME].create_index("_cve_ids")
+    logger.info("Indexes on 'id', '_date_updated_parsed', and '_cve_ids' verified.")
 
 # ---------------------------------------------------------------------------
 # Bulk Page Processor
@@ -332,6 +356,9 @@ async def process_page(
             "mirrored_at":          now,
             "source_url":           source_url,
             "_date_updated_parsed": incoming_date,
+            # Shadow index for join.py bulk lookups. Derived from aliases;
+            # original aliases field is preserved unchanged (zero-processing).
+            "_cve_ids":             _extract_cve_ids(item.get("aliases")),
         }
         ops.append(ReplaceOne({"id": euvd_id}, document, upsert=True))
 
