@@ -1,6 +1,6 @@
 """
-euvd-raw-new.py
-===============
+euvd-raw.py
+===========
 GRIDr Raw Ingest: Mirrors all ENISA EUVD entries into MongoDB
 database GRIDr / collection euvd.
 
@@ -14,7 +14,7 @@ Philosophy (GRIDr / Medallion Architecture)
       • _date_updated_parsed — Parsed UTC datetime of dateUpdated (for indexed
                                change-detection; not present in raw EUVD payload)
   - Idempotency: item.id is the unique key. Per-item change detection via
-    _date_updated_parsed prevents unnecessary DB writes.
+    _date_updated_parsed prevents redundant DB writes via bulk_write filter.
 
 Run Modes
 ---------
@@ -30,25 +30,56 @@ Run Modes
 
 State Documents (GRIDr / metadata collection)
 ----------------------------------------------
-  "euvd_run_state"  — Written after each page; cleared on successful finish.
-                      Enables RESUME after any abort or crash.
+  "euvd_run_state"  — Written after each page batch; cleared on successful
+                      finish. Enables RESUME after any abort or crash.
+                      Tracks the highest *contiguous* completed page so a
+                      resume never re-fetches pages already checkpointed.
   "euvd_last_run"   — Written on successful finish. Enables DELTA on next run.
+
+Performance Architecture
+------------------------
+  - Concurrent page fetching via asyncio.gather over WINDOW_SIZE batches.
+  - Token-bucket RateLimiter shared across all concurrent fetchers so the
+    total request rate never exceeds 1 / REQUEST_SPACING req/s globally.
+  - Bulk DB writes: one find() (projection) + one bulk_write(ReplaceOne,
+    upsert=True) per page → 2 round-trips instead of 200.
+  - Change detection is performed in Python against the bulk-fetched existing
+    documents, so no update is issued for unchanged items.
 
 Fault Tolerance
 ---------------
-  - Token-Bucket RateLimiter: max 1 req / REQUEST_SPACING seconds (ENISA).
   - Retry + exponential backoff on 403 / 429 / 5xx / Timeout / ConnectError.
+  - Checkpoint tracks highest contiguous completed page so a resume is safe
+    even when concurrent pages complete out of order.
   - Script aborts are safe: upsert=True + checkpoint → clean resume.
+
+Tuning Guide
+------------
+  REQUEST_SPACING      = 0.7 → ~1.43 req/s globally. burst MUST stay at 1;
+                               never set burst > 1 or concurrent windows will
+                               fire simultaneously and trigger ENISA 403 storms.
+                               To increase throughput, reduce REQUEST_SPACING
+                               in 0.05s steps (0.6 → 0.5) only after a clean
+                               full run with zero 403s.
+  MAX_CONCURRENT_PAGES = 4   → Pages simultaneously in-flight. The semaphore
+                               enforces this ceiling; the rate limiter (burst=1)
+                               gates the actual dispatch cadence to 1 req/0.7s.
+  WINDOW_SIZE = 32           → How many page coroutines are passed to a single
+                               asyncio.gather() call. A larger window allows
+                               faster pages to keep the semaphore slots filled
+                               while slower ones retry.
 """
 
 import asyncio
-import httpx
 import logging
 import random
+from collections import defaultdict
 from datetime import datetime, UTC
 from typing import Any
 
+import httpx
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReplaceOne
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -62,9 +93,15 @@ COLL_META  = "metadata"
 ENISA_SEARCH_URL = "https://euvdservices.enisa.europa.eu/api/search"
 PAGE_SIZE        = 100
 
-MAX_CONCURRENT_PAGES = 3       # Conservative — ENISA rate-limits aggressively
-REQUEST_SPACING      = 1.5     # Seconds between requests (token bucket)
+# --- Concurrency & Rate Limiting -------------------------------------------
+# burst MUST stay at 1. Setting burst > 1 lets multiple tokens accumulate
+# and fire simultaneously at window boundaries, causing ENISA 403 storms.
+# To increase throughput, reduce REQUEST_SPACING (carefully) — never raise burst.
+MAX_CONCURRENT_PAGES = 4      # Max pages simultaneously in-flight
+REQUEST_SPACING      = 0.7    # Seconds between token-bucket grants (~1.43 req/s)
+WINDOW_SIZE          = 32     # Pages per asyncio.gather() call
 
+# --- Retry / Backoff --------------------------------------------------------
 MAX_RETRIES    = 6
 BACKOFF_BASE   = 4.0
 BACKOFF_CAP    = 120.0
@@ -72,9 +109,9 @@ BACKOFF_JITTER = 0.4
 
 RETRIABLE_CODES = {403, 429, 500, 502, 503, 504}
 
-# State document IDs in metadata collection
-RUN_STATE_ID = "euvd_run_state"   # In-progress checkpoint
-LAST_RUN_ID  = "euvd_last_run"    # Last successful run info
+# --- State Document IDs -----------------------------------------------------
+RUN_STATE_ID = "euvd_run_state"
+LAST_RUN_ID  = "euvd_last_run"
 
 HEADERS = {
     "User-Agent": (
@@ -101,9 +138,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class RateLimiter:
-    """Async Token-Bucket Rate Limiter. Guarantees max `rate` requests/second."""
+    """
+    Async token-bucket rate limiter.
 
-    def __init__(self, rate: float, burst: int) -> None:
+    burst is always 1. Even though MAX_CONCURRENT_PAGES > 1, each concurrent
+    page must wait its turn through the limiter — they share one queue.
+    This prevents the thundering-herd effect where all semaphore slots fire
+    simultaneously at the start of each window and trip ENISA's rate guard.
+    Steady-state throughput = 1 / REQUEST_SPACING req/s.
+    """
+
+    def __init__(self, rate: float, burst: int = 1) -> None:
         self._rate   = rate
         self._burst  = float(burst)
         self._tokens = float(burst)
@@ -112,10 +157,10 @@ class RateLimiter:
 
     async def acquire(self) -> None:
         async with self._lock:
-            now            = asyncio.get_event_loop().time()
-            elapsed        = now - self._last if self._last else 0.0
-            self._last     = now
-            self._tokens   = min(self._burst, self._tokens + elapsed * self._rate)
+            now          = asyncio.get_event_loop().time()
+            elapsed      = now - self._last if self._last else 0.0
+            self._last   = now
+            self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
             else:
@@ -144,12 +189,18 @@ def _parse_enisa_date(date_str: str | None) -> datetime | None:
     except (ValueError, TypeError):
         return None
 
+
+def _normalize_stored_date(dt: datetime | None) -> datetime | None:
+    """Normalizes a stored datetime to UTC-aware (Motor may return naive UTC)."""
+    if dt and dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
 # ---------------------------------------------------------------------------
 # State Management  (GRIDr / metadata)
 # ---------------------------------------------------------------------------
 
 async def _load_run_state(db) -> dict | None:
-    """Returns the checkpoint of an in-progress run, or None."""
     return await db[COLL_META].find_one({"_id": RUN_STATE_ID})
 
 
@@ -160,7 +211,6 @@ async def _save_run_state(
     run_started_at:      datetime,
     total_at_start:      int,
 ) -> None:
-    """Saves per-page checkpoint so a crashed run can be resumed."""
     await db[COLL_META].update_one(
         {"_id": RUN_STATE_ID},
         {"$set": {
@@ -175,19 +225,16 @@ async def _save_run_state(
 
 
 async def _clear_run_state(db) -> None:
-    """Deletes the in-progress checkpoint after a successful finish."""
     await db[COLL_META].delete_one({"_id": RUN_STATE_ID})
     logger.info("Run state cleared.")
 
 
 async def _load_last_run(db) -> datetime | None:
-    """Returns the timestamp of the last successful run, or None."""
     doc = await db[COLL_META].find_one({"_id": LAST_RUN_ID})
     return doc.get("completed_at") if doc else None
 
 
 async def _save_last_run(db, completed_at: datetime, stats: dict) -> None:
-    """Persists the successful run timestamp and summary stats."""
     await db[COLL_META].update_one(
         {"_id": LAST_RUN_ID},
         {"$set": {"completed_at": completed_at, **stats}},
@@ -200,66 +247,117 @@ async def _save_last_run(db, completed_at: datetime, stats: dict) -> None:
 # ---------------------------------------------------------------------------
 
 async def ensure_indexes(db) -> None:
-    """Creates indexes on the euvd collection (idempotent)."""
     await db[COLL_NAME].create_index("id", unique=True)
     await db[COLL_NAME].create_index("_date_updated_parsed")
     logger.info("Indexes on 'id' and '_date_updated_parsed' verified.")
 
 # ---------------------------------------------------------------------------
-# Raw Ingest — single item
+# Bulk Page Processor
 # ---------------------------------------------------------------------------
 
-async def store_raw_item(item: dict[str, Any], source_url: str, db) -> str:
+async def process_page(
+    data:       dict[str, Any],
+    source_url: str,
+    db,
+) -> tuple[int, int, int]:
     """
-    Stores a single EUVD item unchanged in GRIDr.
+    Stores all items from one fetched page using bulk_write.
 
-    Change Detection
-    ----------------
-    Compares incoming dateUpdated with the stored _date_updated_parsed:
-      Not in DB         → inserted
-      Incoming is newer → updated
-      Same or older     → skipped (no DB write)
+    Algorithm
+    ---------
+    1. Parse all items and build a {euvd_id: incoming_date} map.
+    2. Bulk-fetch existing _date_updated_parsed for all IDs in one find().
+    3. Determine which items are new, updated, or unchanged (in Python).
+    4. Issue a single bulk_write(ReplaceOne, upsert=True) for new/updated only.
 
-    Returns: 'inserted' | 'updated' | 'skipped'
+    This replaces ~200 individual round-trips (find_one + update_one per item)
+    with exactly 2 DB operations regardless of page size.
+
+    Returns (inserted, updated, skipped) counts.
     """
-    euvd_id = (item.get("id") or "").strip()
-    if not euvd_id:
-        logger.warning("  [SKIP] Item has no 'id' field.")
-        return "skipped"
+    items = data.get("items") or []
+    if not items:
+        return 0, 0, 0
 
-    incoming_date = _parse_enisa_date(item.get("dateUpdated"))
+    now = datetime.now(UTC)
 
-    # Projection: fetch only the change-detection field (fast, indexed lookup)
-    existing = await db[COLL_NAME].find_one(
-        {"id": euvd_id},
-        {"_date_updated_parsed": 1},
+    # --- Step 1: Parse all incoming items -----------------------------------
+    # parsed_items: list of (euvd_id, incoming_date, original_item)
+    parsed: list[tuple[str, datetime | None, dict]] = []
+    skipped = 0
+
+    for item in items:
+        euvd_id = (item.get("id") or "").strip()
+        if not euvd_id:
+            logger.warning("  [SKIP] Item has no 'id' field.")
+            skipped += 1
+            continue
+        parsed.append((euvd_id, _parse_enisa_date(item.get("dateUpdated")), item))
+
+    if not parsed:
+        return 0, 0, skipped
+
+    all_ids = [p[0] for p in parsed]
+
+    # --- Step 2: Bulk-fetch existing change-detection timestamps ------------
+    existing_dates: dict[str, datetime | None] = {}
+    cursor = db[COLL_NAME].find(
+        {"id": {"$in": all_ids}},
+        {"id": 1, "_date_updated_parsed": 1},
     )
+    async for doc in cursor:
+        existing_dates[doc["id"]] = _normalize_stored_date(
+            doc.get("_date_updated_parsed")
+        )
 
-    if existing:
-        stored_date = existing.get("_date_updated_parsed")
-        # MongoDB/Motor may return naive datetimes even for UTC-stored values.
-        # Normalize to UTC-aware before comparing to avoid TypeError.
-        if stored_date and stored_date.tzinfo is None:
-            stored_date = stored_date.replace(tzinfo=UTC)
-        if stored_date and incoming_date and incoming_date <= stored_date:
-            logger.debug(f"  [SKIP] {euvd_id} — unchanged.")
-            return "skipped"
+    # --- Step 3: Change detection in Python ---------------------------------
+    ops: list[ReplaceOne] = []
+    inserted = updated = 0
 
-    document = {
-        **item,
-        "mirrored_at":          datetime.now(UTC),
-        "source_url":           source_url,
-        "_date_updated_parsed": incoming_date,
-    }
-    await db[COLL_NAME].update_one(
-        {"id": euvd_id},
-        {"$set": document},
-        upsert=True,
-    )
+    for euvd_id, incoming_date, item in parsed:
+        stored_date = existing_dates.get(euvd_id)  # None means not in DB
 
-    action = "inserted" if not existing else "updated"
-    logger.info(f"  [{action.upper()}] {euvd_id}")
-    return action
+        if stored_date is not None:
+            # Already exists — skip if not newer
+            if incoming_date and stored_date and incoming_date <= stored_date:
+                logger.debug(f"  [SKIP] {euvd_id} — unchanged.")
+                skipped += 1
+                continue
+            updated += 1
+        else:
+            inserted += 1
+
+        document = {
+            **item,
+            "mirrored_at":          now,
+            "source_url":           source_url,
+            "_date_updated_parsed": incoming_date,
+        }
+        ops.append(ReplaceOne({"id": euvd_id}, document, upsert=True))
+
+    # --- Step 4: Single bulk_write ------------------------------------------
+    if ops:
+        await db[COLL_NAME].bulk_write(ops, ordered=False)
+
+    return inserted, updated, skipped
+
+# ---------------------------------------------------------------------------
+# Delta Early-Termination Helper
+# ---------------------------------------------------------------------------
+
+def _page_is_all_old(data: dict[str, Any], since: datetime) -> bool:
+    """
+    Returns True if every item on the page has dateUpdated <= since.
+    Used for delta early-termination.
+    """
+    items = data.get("items") or []
+    if not items:
+        return True
+    for item in items:
+        item_date = _parse_enisa_date(item.get("dateUpdated"))
+        if item_date is None or item_date > since:
+            return False
+    return True
 
 # ---------------------------------------------------------------------------
 # HTTP Layer with Retry & Backoff
@@ -295,28 +393,44 @@ async def fetch_page(
                         )
                         await asyncio.sleep(delay)
                         continue
-                    logger.error(f"  [FAILED] page {page} — HTTP {resp.status_code} after {MAX_RETRIES} retries.")
+                    logger.error(
+                        f"  [FAILED] page {page} — HTTP {resp.status_code} "
+                        f"after {MAX_RETRIES} retries."
+                    )
                     return None
 
-                logger.warning(f"  [HTTP {resp.status_code}] page {page} — non-retriable, skipped.")
+                logger.warning(
+                    f"  [HTTP {resp.status_code}] page {page} — non-retriable, skipped."
+                )
                 return None
 
             except httpx.TimeoutException:
                 if attempt < MAX_RETRIES:
                     delay = _backoff_delay(attempt)
-                    logger.warning(f"  [TIMEOUT] page {page} (attempt {attempt + 1}/{MAX_RETRIES}) — retry in {delay:.1f}s")
+                    logger.warning(
+                        f"  [TIMEOUT] page {page} "
+                        f"(attempt {attempt + 1}/{MAX_RETRIES}) — retry in {delay:.1f}s"
+                    )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(f"  [FAILED] page {page} — timed out after {MAX_RETRIES} retries.")
+                    logger.error(
+                        f"  [FAILED] page {page} — timed out after {MAX_RETRIES} retries."
+                    )
                     return None
 
             except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
                 if attempt < MAX_RETRIES:
                     delay = _backoff_delay(attempt)
-                    logger.warning(f"  [CONN ERROR] page {page}: {exc} (attempt {attempt + 1}/{MAX_RETRIES}) — retry in {delay:.1f}s")
+                    logger.warning(
+                        f"  [CONN ERROR] page {page}: {exc} "
+                        f"(attempt {attempt + 1}/{MAX_RETRIES}) — retry in {delay:.1f}s"
+                    )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(f"  [FAILED] page {page} — connection error after {MAX_RETRIES} retries: {exc}")
+                    logger.error(
+                        f"  [FAILED] page {page} — connection error after "
+                        f"{MAX_RETRIES} retries: {exc}"
+                    )
                     return None
 
             except Exception as exc:
@@ -326,55 +440,37 @@ async def fetch_page(
     return None
 
 # ---------------------------------------------------------------------------
-# Page Processor
+# Fetch-and-Process Coroutine (per page)
 # ---------------------------------------------------------------------------
 
-async def process_page(
-    data:       dict[str, Any],
-    source_url: str,
+async def fetch_and_process_page(
+    client:        httpx.AsyncClient,
     db,
-) -> tuple[int, int, int]:
+    page:          int,
+    semaphore:     asyncio.Semaphore,
+    limiter:       RateLimiter,
+    prefetched:    dict[int, dict] | None = None,
+) -> tuple[int, int, int, int, bool]:
     """
-    Stores all items from one fetched page.
-    Returns (inserted, updated, skipped) counts.
+    Fetches and processes a single page.
+
+    Returns (inserted, updated, skipped, failed, data_was_fetched).
+    'data_was_fetched' is False only if the HTTP fetch permanently failed,
+    which lets the caller decide whether to count this page as failed.
     """
-    items = data.get("items") or []
-    if not items:
-        return 0, 0, 0
+    page_url = f"{ENISA_SEARCH_URL}?size={PAGE_SIZE}&page={page}"
 
-    results = await asyncio.gather(
-        *[store_raw_item(item, source_url, db) for item in items],
-        return_exceptions=True,
-    )
+    # Use pre-fetched data (page 0) if available
+    if prefetched and page in prefetched:
+        data = prefetched[page]
+    else:
+        data = await fetch_page(client, page, semaphore, limiter)
 
-    inserted = updated = skipped = 0
-    for r in results:
-        if isinstance(r, Exception):
-            logger.error(f"  [ERROR] Unexpected exception: {r}")
-            skipped += 1
-        elif r == "inserted":
-            inserted += 1
-        elif r == "updated":
-            updated += 1
-        else:
-            skipped += 1
+    if data is None:
+        return 0, 0, 0, PAGE_SIZE, False
 
-    return inserted, updated, skipped
-
-
-def _page_is_all_old(data: dict[str, Any], since: datetime) -> bool:
-    """
-    Returns True if every item on the page has dateUpdated <= since.
-    Used for delta early-termination: once a full page is "old", we can stop.
-    """
-    items = data.get("items") or []
-    if not items:
-        return True
-    for item in items:
-        item_date = _parse_enisa_date(item.get("dateUpdated"))
-        if item_date is None or item_date > since:
-            return False
-    return True
+    ins, upd, skp = await process_page(data, page_url, db)
+    return ins, upd, skp, 0, True
 
 # ---------------------------------------------------------------------------
 # Entry Point
@@ -382,15 +478,22 @@ def _page_is_all_old(data: dict[str, Any], since: datetime) -> bool:
 
 async def run_import() -> None:
     """
-    Main coroutine. Determines run mode, processes pages sequentially
-    (with semaphore + RateLimiter), checkpoints after each page, and
-    saves the last-run state on successful completion.
+    Main coroutine. Determines run mode, processes pages in concurrent windows,
+    checkpoints after each window, and saves last-run state on completion.
 
-    Run Modes
-    ---------
-    RESUME    — euvd_run_state found → continue from last_completed_page + 1
-    DELTA     — euvd_last_run found  → stop when a full page is all-old
-    FULL SEED — no state             → process all pages
+    Concurrency Model
+    -----------------
+    Pages are dispatched in windows of WINDOW_SIZE using asyncio.gather.
+    Within each window, a shared asyncio.Semaphore(MAX_CONCURRENT_PAGES) caps
+    the number of pages simultaneously performing HTTP I/O. The RateLimiter
+    (token bucket, burst=MAX_CONCURRENT_PAGES) enforces the global request rate.
+
+    Checkpoint Safety with Concurrent Pages
+    ----------------------------------------
+    Pages within a window may complete out of order. The checkpoint always
+    records the highest *contiguous* page that has completed, starting from
+    start_page. This ensures that after a crash, resume starts from a page
+    that is guaranteed to need processing.
     """
     mongo_client = AsyncIOMotorClient(MONGO_URI)
     db           = mongo_client[DB_NAME]
@@ -399,16 +502,16 @@ async def run_import() -> None:
         await ensure_indexes(db)
 
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
+        # burst=1: strictly one token at a time — no accumulation between windows.
         limiter   = RateLimiter(rate=1.0 / REQUEST_SPACING, burst=1)
 
-        # Load existing state
         run_state = await _load_run_state(db)
         last_run  = await _load_last_run(db)
 
         async with httpx.AsyncClient(headers=HEADERS, verify=True) as client:
 
             # ----------------------------------------------------------------
-            # Fetch page 0 — always needed to get the current total count
+            # Fetch page 0 — needed for total count and FULL SEED / DELTA
             # ----------------------------------------------------------------
             logger.info("Fetching page 0 from ENISA EUVD...")
             first_data = await fetch_page(client, 0, semaphore, limiter)
@@ -422,10 +525,7 @@ async def run_import() -> None:
             # ----------------------------------------------------------------
             # Determine mode and start page
             # ----------------------------------------------------------------
-            run_started_at: datetime
-
             if run_state:
-                # RESUME: continue from the page after the last checkpoint
                 start_page     = run_state["last_completed_page"] + 1
                 run_started_at = run_state["run_started_at"]
                 total_at_start = run_state.get("total_at_start", total_entries)
@@ -444,53 +544,148 @@ async def run_import() -> None:
                 if last_run:
                     logger.info(f"MODE: DELTA — last successful run: {last_run.isoformat()}")
                 else:
-                    logger.info(f"MODE: FULL SEED — {total_entries:,} entries across {total_pages:,} pages")
+                    logger.info(
+                        f"MODE: FULL SEED — {total_entries:,} entries "
+                        f"across {total_pages:,} pages"
+                    )
 
+            logger.info("=" * 60)
+            logger.info(
+                f"Concurrency: {MAX_CONCURRENT_PAGES} pages in-flight | "
+                f"Rate: 1 req/{REQUEST_SPACING}s (~{1/REQUEST_SPACING:.1f} req/s) | "
+                f"Window: {WINDOW_SIZE} pages/gather | burst=1 (strict)"
+            )
             logger.info("=" * 60)
 
             # ----------------------------------------------------------------
-            # Page loop
+            # Page loop — windowed concurrent gather
             # ----------------------------------------------------------------
             total_inserted = total_updated = total_skipped = total_failed = 0
 
-            for page in range(start_page, total_pages):
-                page_url = f"{ENISA_SEARCH_URL}?size={PAGE_SIZE}&page={page}"
+            # highest_contiguous tracks the checkpoint watermark
+            # It is the largest page N such that all pages [start_page..N] are done.
+            highest_contiguous = start_page - 1
 
-                # Use already-fetched page 0 data if applicable
-                if page == 0 and not run_state:
-                    data = first_data
-                else:
-                    data = await fetch_page(client, page, semaphore, limiter)
+            # Pre-seed page 0 data so it isn't fetched again (only in non-RESUME modes
+            # where start_page == 0)
+            prefetched: dict[int, dict] = {}
+            if start_page == 0 and not run_state:
+                prefetched[0] = first_data
 
-                if data is None:
-                    logger.warning(f"  [SKIP] page {page} could not be fetched — checkpoint saved, continuing.")
-                    # Save checkpoint even on failure so next resume skips this page
-                    await _save_run_state(db, page, total_pages, run_started_at, total_at_start)
-                    total_failed += PAGE_SIZE
-                    continue
+            delta_cutoff_triggered = False
 
-                # Delta early-termination: stop if the whole page is already up-to-date
-                if mode == "DELTA" and last_run and _page_is_all_old(data, last_run):
-                    logger.info(
-                        f"  [DELTA CUTOFF] page {page} — all items already up-to-date. "
-                        f"Stopping early."
-                    )
+            page_range = list(range(start_page, total_pages))
+
+            for window_start in range(0, len(page_range), WINDOW_SIZE):
+                if delta_cutoff_triggered:
                     break
 
-                ins, upd, skp = await process_page(data, page_url, db)
-                total_inserted += ins
-                total_updated  += upd
-                total_skipped  += skp
+                window_pages = page_range[window_start:window_start + WINDOW_SIZE]
 
-                # Save checkpoint after each successfully processed page
-                await _save_run_state(db, page, total_pages, run_started_at, total_at_start)
+                # --- DELTA pre-check for the window's first page -----------
+                # For DELTA mode, quickly check page 0 (or window start) to
+                # see if we can skip the entire window. The per-item safety
+                # net in process_page handles boundary cases.
+                if mode == "DELTA" and last_run:
+                    # Check the first page of the window using prefetched or
+                    # first_data if available; otherwise we defer to post-fetch.
+                    first_page_in_window = window_pages[0]
+                    if first_page_in_window in prefetched:
+                        if _page_is_all_old(prefetched[first_page_in_window], last_run):
+                            logger.info(
+                                f"  [DELTA CUTOFF] page {first_page_in_window} — "
+                                f"all items already up-to-date. Stopping."
+                            )
+                            delta_cutoff_triggered = True
+                            break
 
-                if page % 10 == 0 or page == total_pages - 1:
-                    logger.info(
-                        f"  Progress: page {page}/{total_pages - 1} | "
-                        f"+{ins} inserted / +{upd} updated / {skp} skipped this page | "
-                        f"Total so far: {total_inserted}/{total_updated}/{total_skipped}"
+                # Dispatch all pages in this window concurrently
+                tasks = [
+                    fetch_and_process_page(
+                        client, db, p, semaphore, limiter,
+                        prefetched if p in prefetched else None,
                     )
+                    for p in window_pages
+                ]
+                window_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # --- Accumulate results and update watermark ----------------
+                completed_in_window: set[int] = set()
+
+                for i, result in enumerate(window_results):
+                    page = window_pages[i]
+
+                    if isinstance(result, Exception):
+                        logger.error(f"  [ERROR] page {page}: {result}")
+                        total_failed += PAGE_SIZE
+                        # Don't mark as completed — checkpoint won't advance past it
+                        continue
+
+                    ins, upd, skp, fail, fetched = result
+
+                    if not fetched:
+                        logger.warning(
+                            f"  [SKIP] page {page} could not be fetched — "
+                            f"checkpoint will not advance past page {highest_contiguous}."
+                        )
+                        total_failed += fail
+                        continue
+
+                    # --- DELTA per-page cutoff check (post-fetch) -----------
+                    # We re-use the raw data indirectly: if everything was skipped
+                    # and nothing was inserted/updated, treat as a signal that
+                    # the page was all-old. This is a conservative heuristic;
+                    # the real cutoff is the prefetched check above.
+                    # For a strict check we'd need to retain the raw data, but
+                    # that trades memory for accuracy. The skipped-only heuristic
+                    # is sufficient for typical DELTA runs where the API sorts
+                    # newest-first.
+                    if mode == "DELTA" and last_run and ins == 0 and upd == 0 and skp > 0:
+                        logger.info(
+                            f"  [DELTA CUTOFF] page {page} — "
+                            f"all items unchanged. Stopping after this window."
+                        )
+                        delta_cutoff_triggered = True
+                        # Still record this page as completed so checkpoint advances
+                        completed_in_window.add(page)
+                        total_inserted += ins
+                        total_updated  += upd
+                        total_skipped  += skp
+                        total_failed   += fail
+                        continue
+
+                    completed_in_window.add(page)
+                    total_inserted += ins
+                    total_updated  += upd
+                    total_skipped  += skp
+                    total_failed   += fail
+
+                # Advance contiguous watermark
+                for p in window_pages:
+                    if p in completed_in_window:
+                        if p == highest_contiguous + 1:
+                            highest_contiguous = p
+                        # else: gap — watermark stays where it is
+                    else:
+                        break  # First gap — stop advancing
+
+                # Checkpoint the watermark after each window
+                if highest_contiguous >= start_page:
+                    await _save_run_state(
+                        db, highest_contiguous, total_pages,
+                        run_started_at, total_at_start,
+                    )
+
+                # Progress log every window
+                logger.info(
+                    f"  Progress: pages {window_pages[0]}–{window_pages[-1]}/{total_pages - 1} | "
+                    f"Window: +{total_inserted} ins / +{total_updated} upd / "
+                    f"{total_skipped} skp | "
+                    f"Checkpoint: page {highest_contiguous}"
+                )
+
+                if delta_cutoff_triggered:
+                    break
 
             # ----------------------------------------------------------------
             # Finalize
