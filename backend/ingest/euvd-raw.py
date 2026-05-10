@@ -231,7 +231,7 @@ async def _clear_run_state(db) -> None:
 
 async def _load_last_run(db) -> datetime | None:
     doc = await db[COLL_META].find_one({"_id": LAST_RUN_ID})
-    return doc.get("completed_at") if doc else None
+    return _normalize_stored_date(doc.get("completed_at")) if doc else None
 
 
 async def _save_last_run(db, completed_at: datetime, stats: dict) -> None:
