@@ -36,12 +36,17 @@ function fetch_api(string $url): ?array {
 }
 
 // ─── Daten laden & gruppieren ─────────────────────────────────────────────────
-$groups        = [];   // [advisory_key => group_data]
-$page          = 1;
-$error         = null;
-$resp          = [];
+$groups       = [];   // [advisory_key => group_data]
+$page         = 1;
+$error        = null;
+$resp         = [];
+$fetched_raw  = 0;
+// Fetch enough raw entries so recently-modified advisories aren't missed.
+// Early group-count termination is wrong: a page of 200 *unique* CVEs fills
+// 200 groups immediately and hides advisories that appear on later pages.
+$target_raw   = max($show_limit * 5, 5 * PER_PAGE); // at least 5 full pages
 
-while (count($groups) < $show_limit && $page <= MAX_PAGES) {
+while ($page <= MAX_PAGES) {
     $url  = API_BASE . '/API/advisories/'
           . '?page_size=' . PER_PAGE
           . '&page='      . $page
@@ -101,8 +106,11 @@ while (count($groups) < $show_limit && $page <= MAX_PAGES) {
         }
     }
 
+    $fetched_raw += count($resp['data']);
+
     $has_next = $resp['pagination']['has_next'] ?? false;
     if (!$has_next) break;
+    if ($fetched_raw >= $target_raw) break;
     $page++;
 }
 
