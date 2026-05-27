@@ -30,6 +30,14 @@ For a deep dive into the system design, please refer to the [Architecture.md](Ar
 - **Infrastructure:** Docker for database containerization.
 - **Frontend Interface:** PHP (Public Web Entry Point).
 
+## Installation
+
+Install all dependencies via `apt` (`asyncio` is part of the Python standard library and needs no installation):
+
+```bash
+sudo apt install python3-httpx python3-h2 python3-bs4 python3-motor python3-uvicorn php
+```
+
 ## Project Structure
 
 ```text
