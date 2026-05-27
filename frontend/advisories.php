@@ -534,37 +534,28 @@ function buildRow(grp, rowNum) {
    RENDER NEW GROUPS (append unrendered groups sorted by modified_at)
    ════════════════════════════════════════════════════════════════════ */
 function renderNewGroups() {
-    /* collect all groups, sort by modified_at desc, keep stable order */
-    const sorted = [...groups.values()].sort((a, b) =>
-        new Date(b.modified_at || '1970') - new Date(a.modified_at || '1970')
-    );
-
-    /* remove skeleton */
+    /* Remove skeleton placeholder on first real render */
     if (skeleton && skeleton.parentNode) skeleton.remove();
 
-    /* rebuild tbody fully in document-order to maintain sort */
-    /* Only do a full rebuild when row count changes significantly; otherwise append. */
-    /* Strategy: track which groups already have a <tr> in allRows array. */
-    /* For newly-seen groups (rendered=false), build & insert at correct sorted position. */
+    /* Collect only groups that haven't been rendered yet */
+    /* API returns sorted desc by modified_at, so new pages always have OLDER items
+       → we can safely append them to the bottom of the existing table. */
+    const unrendered = [...groups.values()]
+        .filter(g => !g.rendered)
+        .sort((a, b) => new Date(b.modified_at || '1970') - new Date(a.modified_at || '1970'));
 
-    const newGroups = sorted.filter(g => !g.rendered);
-    if (newGroups.length === 0) return;
-
-    /* We rebuild the full sorted list by clearing tbody and re-inserting.
-       Use a DocumentFragment for performance. */
-    rowCursor = 0;
-    const frag = document.createDocumentFragment();
-    allRows = [];
-    for (const grp of sorted) {
-        grp.rendered = true;
-        rowCursor++;
-        const tr = buildRow(grp, rowCursor);
-        grp._tr = tr;
-        frag.appendChild(tr);
-        allRows.push(tr);
+    if (unrendered.length > 0) {
+        const frag = document.createDocumentFragment();
+        for (const grp of unrendered) {
+            grp.rendered = true;
+            rowCursor++;
+            const tr = buildRow(grp, rowCursor);
+            grp._tr  = tr;
+            frag.appendChild(tr);
+            allRows.push(tr);
+        }
+        tbody.appendChild(frag);  // append — never clear
     }
-    tbody.innerHTML = '';
-    tbody.appendChild(frag);
 
     updateStats();
     applyPagination();
@@ -682,10 +673,8 @@ async function loadBatch() {
         const isFirstBatch = apiPage === 1;
         apiPage++;
 
-        /* render immediately if this is the first batch OR we have enough */
-        if (isFirstBatch || groups.size % 50 === 0) {
-            renderNewGroups();
-        }
+        /* Always render new rows so the counter & table stay live */
+        renderNewGroups();
 
         loading = false;
 
