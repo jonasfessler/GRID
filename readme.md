@@ -25,7 +25,7 @@ For a deep dive into the system design, please refer to the [Architecture.md](Ar
 
 ## Tech Stack
 
-- **Backend:** Python 3.11+ (Core libraries: `motor`, `httpx`, `asyncio`, `beautifulsoup4`).
+- **Backend:** Python 3.11+ (Core libraries: `motor`, `httpx`, `h2`, `asyncio`, `beautifulsoup4`).
 - **Database:** MongoDB 7.0+ (NoSQL).
 - **Infrastructure:** Docker for database containerization.
 - **Frontend Interface:** PHP (Public Web Entry Point).
