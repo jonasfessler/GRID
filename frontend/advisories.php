@@ -155,7 +155,7 @@ function remediation_class(string $status): string {
     return 'rem-unknown';
 }
 
-$generated_at = (new DateTime())->format('d.m.Y H:i:s');
+$generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
 ?>
 <!DOCTYPE html>
 <html lang="de" data-theme="dark">
@@ -302,7 +302,7 @@ $generated_at = (new DateTime())->format('d.m.Y H:i:s');
       <div class="section-header">
         <h1 class="section-title">Security Advisories</h1>
         <span class="section-meta">
-          <?= count($advisories) ?> von <?= number_format($page_total) ?> &nbsp;·&nbsp; Generiert: <?= htmlspecialchars($generated_at) ?>
+          <?= count($advisories) ?> von <?= number_format($page_total) ?> &nbsp;·&nbsp; Generiert: <span data-fmt-datetime="<?= htmlspecialchars($generated_at_iso) ?>">…</span>
         </span>
       </div>
 
@@ -384,7 +384,7 @@ $generated_at = (new DateTime())->format('d.m.Y H:i:s');
                   <div class="adv-desc"><?= htmlspecialchars($lead['description']) ?></div>
                 <?php endif; ?>
                 <?php if ($grp['published_at']): ?>
-                  <div class="adv-published">Veröffentlicht: <?= fmt_date($grp['published_at']) ?></div>
+                  <div class="adv-published">Veröffentlicht: <span data-fmt-date="<?= htmlspecialchars($grp['published_at']) ?>">…</span></div>
                 <?php endif; ?>
               </td>
 
@@ -432,8 +432,8 @@ $generated_at = (new DateTime())->format('d.m.Y H:i:s');
 
               <!-- Aktualisiert -->
               <td>
-                <span class="mod-date"><?= fmt_date($grp['modified_at']) ?></span>
-                <span class="mod-ago"><?= ago($grp['modified_at']) ?></span>
+                <span class="mod-date" data-fmt-date="<?= htmlspecialchars($grp['modified_at']) ?>">…</span>
+                <span class="mod-ago" data-fmt-ago="<?= htmlspecialchars($grp['modified_at']) ?>">…</span>
               </td>
 
               <!-- Remediation-Status -->
@@ -508,6 +508,48 @@ $generated_at = (new DateTime())->format('d.m.Y H:i:s');
       ? '+' + hidden.length + ' weitere'
       : 'Weniger ▲';
   }
+
+  /* ── CLIENT-SIDE DATE FORMATTING (browser timezone) ── */
+  const _dateFmt = new Intl.DateTimeFormat(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const _dtFmt   = new Intl.DateTimeFormat(undefined, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    try { return _dateFmt.format(new Date(iso)); } catch(e) { return iso; }
+  }
+
+  function fmtDatetime(iso) {
+    if (!iso) return '—';
+    try { return _dtFmt.format(new Date(iso)); } catch(e) { return iso; }
+  }
+
+  function ago(iso) {
+    if (!iso) return '';
+    try {
+      const d   = new Date(iso);
+      const now = new Date();
+      // Strip to local calendar date (no time) for accurate day comparison
+      const dLocal   = new Date(d.getFullYear(),   d.getMonth(),   d.getDate());
+      const nowLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const days = Math.round((nowLocal - dLocal) / 86400000);
+      if (days === 0)  return 'Heute';
+      if (days === 1)  return 'Gestern';
+      if (days < 7)   return `vor ${days} Tagen`;
+      if (days < 30)  return 'vor ' + Math.floor(days / 7)  + ' Wochen';
+      if (days < 365) return 'vor ' + Math.floor(days / 30) + ' Monaten';
+      return 'vor ' + Math.floor(days / 365) + ' Jahren';
+    } catch(e) { return ''; }
+  }
+
+  document.querySelectorAll('[data-fmt-date]').forEach(el => {
+    el.textContent = fmtDate(el.dataset.fmtDate);
+  });
+  document.querySelectorAll('[data-fmt-datetime]').forEach(el => {
+    el.textContent = fmtDatetime(el.dataset.fmtDatetime);
+  });
+  document.querySelectorAll('[data-fmt-ago]').forEach(el => {
+    el.textContent = ago(el.dataset.fmtAgo);
+  });
 </script>
 
 </body>
