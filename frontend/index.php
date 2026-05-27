@@ -88,6 +88,7 @@ $api_ok = ($status !== null);
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>GRID — Global Risk Intelligence Dashboard</title>
   <meta name="description" content="GRID Dashboard — Real-time global vulnerability and risk intelligence overview." />
+  <link rel="icon" type="image/svg+xml" href="../media/logo.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -101,7 +102,8 @@ $api_ok = ($status !== null);
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
       <div class="logo-mark">
-        <span class="logo-g">G</span><span class="logo-rid">RID</span>
+        <img src="../media/logo.svg" alt="GRID Logo" style="width:32px;height:32px;filter:brightness(0) invert(1);" />
+        <span class="logo-rid" style="font-size:1.35rem;font-weight:800;letter-spacing:.04em;">GRID</span>
       </div>
       <span class="logo-sub">Global Risk Intelligence</span>
     </div>
