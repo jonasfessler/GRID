@@ -333,9 +333,8 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
    GRID — Advisories: Async Progressive Loader
    ════════════════════════════════════════════════════════════════════ */
 
-const API_BASE      = 'http://localhost:8000';
+const PROXY         = 'api-proxy.php';  // same-origin PHP proxy → localhost:8000
 const API_PAGE_SIZE = 200;   // raw items per API request (max allowed)
-const BATCH_TARGET  = 100;   // distinct advisories to collect before first render
 const SORT_BY       = '-timeline.modified_at';
 
 /* ── State ── */
@@ -663,10 +662,16 @@ async function loadBatch() {
     loading = true;
 
     try {
-        const url = `${API_BASE}/API/advisories/?page_size=${API_PAGE_SIZE}&page=${apiPage}&sort_by=${SORT_BY}`;
-        const resp = await fetch(url);
+        const params = new URLSearchParams({
+            path:      '/API/advisories/',
+            page_size: API_PAGE_SIZE,
+            page:      apiPage,
+            sort_by:   SORT_BY,
+        });
+        const resp = await fetch(`${PROXY}?${params}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const json = await resp.json();
+        if (json.error) throw new Error(json.error);
 
         const items = json.data ?? [];
         apiTotal = json.pagination?.total ?? apiTotal;
@@ -699,7 +704,7 @@ async function loadBatch() {
         console.error('Advisory fetch error:', err);
         if (groups.size === 0) {
             errorBanner.style.display = '';
-            errorBanner.innerHTML = `<strong>⚠ API-Fehler:</strong> ${esc(err.message)} — Stelle sicher, dass der GRID-Server unter ${API_BASE} läuft.`;
+            errorBanner.innerHTML = `<strong>⚠ API-Fehler:</strong> ${esc(err.message)} — Stelle sicher, dass der GRID-Server auf dem Host unter Port 8000 läuft.`;
             if (skeleton && skeleton.parentNode) skeleton.remove();
         }
         markDone();
