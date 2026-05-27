@@ -13,10 +13,12 @@
 
 // ─── Konfiguration ────────────────────────────────────────────────────────────
 define('API_BASE',    'http://localhost:8000');
-define('MAX_GROUPS',  100);   // Wie viele Advisories angezeigt werden
 define('PER_PAGE',    200);   // API-Einträge pro Request (Max laut Doku: 200)
-define('MAX_PAGES',    20);   // Safety-Limit für Pagination
+define('MAX_PAGES',    50);   // Safety-Limit für Pagination
 define('API_TIMEOUT',  10);   // Sekunden
+
+// Anzahl der DISTINCT Advisories die geladen werden (URL-Param ?show=N, Default 100)
+$show_limit = max(10, min(500, (int)($_GET['show'] ?? 100)));
 
 // ─── API-Helper ───────────────────────────────────────────────────────────────
 function fetch_api(string $url): ?array {
@@ -39,7 +41,7 @@ $page          = 1;
 $error         = null;
 $resp          = [];
 
-while (count($groups) < MAX_GROUPS && $page <= MAX_PAGES) {
+while (count($groups) < $show_limit && $page <= MAX_PAGES) {
     $url  = API_BASE . '/API/advisories/'
           . '?page_size=' . PER_PAGE
           . '&page='      . $page
@@ -82,13 +84,14 @@ while (count($groups) < MAX_GROUPS && $page <= MAX_PAGES) {
         }
 
         // Neuestes modified_at der Gruppe merken & als Lead-Dokument setzen
-        if ($mod > $groups[$key]['modified_at']) {
+        // strtotime() für robuste ISO-8601-Vergleiche (unabhängig von Timezone-Suffix)
+        if ($mod && strtotime($mod) > strtotime($groups[$key]['modified_at'] ?: '1970-01-01')) {
             $groups[$key]['modified_at'] = $mod;
             $groups[$key]['lead']        = $adv;
         }
 
         // Frühestes published_at der Gruppe merken
-        if ($pub < $groups[$key]['published_at'] || $groups[$key]['published_at'] === '') {
+        if ($pub && (!$groups[$key]['published_at'] || strtotime($pub) < strtotime($groups[$key]['published_at']))) {
             $groups[$key]['published_at'] = $pub;
         }
 
@@ -103,9 +106,11 @@ while (count($groups) < MAX_GROUPS && $page <= MAX_PAGES) {
     $page++;
 }
 
-// Nach modified_at absteigend sortieren, top 100 nehmen
-usort($groups, fn($a, $b) => strcmp($b['modified_at'], $a['modified_at']));
-$advisories = array_slice($groups, 0, MAX_GROUPS);
+// Nach modified_at absteigend sortieren – strtotime() für korrekte ISO-8601-Vergleiche
+usort($groups, function($a, $b) {
+    return strtotime($b['modified_at'] ?: '1970-01-01') <=> strtotime($a['modified_at'] ?: '1970-01-01');
+});
+$advisories = array_slice($groups, 0, $show_limit);
 $page_total = $resp['pagination']['total'] ?? 0;
 
 // Optionaler Status-Call für Header-Statistiken
@@ -299,11 +304,29 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
     <div class="page-body">
 
       <!-- ── Section header ── -->
-      <div class="section-header">
-        <h1 class="section-title">Security Advisories</h1>
-        <span class="section-meta">
-          <?= count($advisories) ?> von <?= number_format($page_total) ?> &nbsp;·&nbsp; Generiert: <span data-fmt-datetime="<?= htmlspecialchars($generated_at_iso) ?>">…</span>
-        </span>
+      <div class="section-header" style="flex-wrap:wrap;gap:.6rem 1.5rem;align-items:center;">
+        <h1 class="section-title" style="margin:0;">Security Advisories</h1>
+        <div style="display:flex;flex-direction:column;gap:.35rem;margin-left:auto;align-items:flex-end;">
+          <span class="section-meta">
+            <?= count($advisories) ?> geladen von <?= number_format($page_total) ?> &nbsp;·&nbsp; Generiert: <span data-fmt-datetime="<?= htmlspecialchars($generated_at_iso) ?>">…</span>
+          </span>
+          <div style="display:flex;align-items:center;gap:.5rem;font-size:12px;color:var(--text-muted);">
+            <label for="showLimit" style="white-space:nowrap;">Gesamt laden:</label>
+            <select id="showLimit" style="background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;padding:.25rem .5rem;font-size:12px;cursor:pointer;" onchange="location.href='advisories.php?show='+this.value">
+              <?php foreach ([10,25,50,100,200,500] as $opt): ?>
+              <option value="<?= $opt ?>"<?= $opt === $show_limit ? ' selected' : '' ?>><?= $opt ?></option>
+              <?php endforeach; ?>
+            </select>
+            <span style="opacity:.3;">|</span>
+            <label for="pageSizeSelect" style="white-space:nowrap;">Pro Seite:</label>
+            <select id="pageSizeSelect" style="background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;padding:.25rem .5rem;font-size:12px;cursor:pointer;">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <?php if ($error): ?>
@@ -455,12 +478,13 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
       </div>
       <?php endif; ?>
 
+      <div id="pagination" style="display:flex;align-items:center;justify-content:center;gap:.35rem;padding:1.25rem 2rem .5rem;flex-wrap:wrap;"></div>
+
       <footer class="page-footer">
         <span>GRID — Global Risk Intelligence Dashboard</span>
         <span>
-          Sortierung: <code>timeline.modified_at</code> ↓
-          &nbsp;·&nbsp; Gruppiert nach Advisory-ID
-          &nbsp;·&nbsp; <?= count($advisories) ?> Einträge
+          Sortierung: <code>timeline.modified_at</code> ↓ &nbsp;·&nbsp; Gruppiert nach Advisory-ID
+          &nbsp;·&nbsp; <?= count($advisories) ?> / <?= number_format($page_total) ?> geladen
         </span>
       </footer>
 
@@ -489,13 +513,7 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
     if (saved) document.documentElement.dataset.theme = saved;
   })();
 
-  /* ── SEARCH FILTER ── */
-  document.getElementById('searchInput').addEventListener('input', function () {
-    const q = this.value.toLowerCase();
-    document.querySelectorAll('#advisoryTableBody tr').forEach(row => {
-      row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
-    });
-  });
+  /* ── SEARCH + PAGINATION (unified, browser-timezone-aware) ── */
 
   /* ── CVE-TAGS TOGGLE ── */
   function toggleCves(rowId) {
@@ -550,6 +568,80 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
   document.querySelectorAll('[data-fmt-ago]').forEach(el => {
     el.textContent = ago(el.dataset.fmtAgo);
   });
+
+  /* ── PAGINATION ENGINE ── */
+  (function () {
+    const tbody    = document.getElementById('advisoryTableBody');
+    const pagerEl  = document.getElementById('pagination');
+    const pageSel  = document.getElementById('pageSizeSelect');
+    const searchEl = document.getElementById('searchInput');
+    if (!tbody || !pagerEl || !pageSel) return;
+
+    let pageSize = +pageSel.value;
+    let curPage  = 1;
+    const allRows = Array.from(tbody.querySelectorAll('tr'));
+
+    const btnStyle = 'padding:.3rem .7rem;border-radius:6px;border:1px solid var(--border,rgba(255,255,255,.12));' +
+      'background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);cursor:pointer;font-size:13px;' +
+      'transition:background .15s,border-color .15s;min-width:2.2rem;text-align:center;';
+
+    function filtered() {
+      const q = (searchEl?.value || '').toLowerCase().trim();
+      return q ? allRows.filter(r => r.textContent.toLowerCase().includes(q)) : allRows;
+    }
+
+    function update() {
+      const rows  = filtered();
+      const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+      curPage = Math.min(curPage, pages);
+      const s = (curPage - 1) * pageSize;
+      allRows.forEach(r => r.style.display = 'none');
+      rows.slice(s, s + pageSize).forEach(r => r.style.display = '');
+      buildPager(rows.length, pages, s);
+    }
+
+    function buildPager(total, pages, s) {
+      pagerEl.innerHTML = '';
+      if (pages <= 1) return;
+
+      const mk = (txt, page, active, disabled) => {
+        const b = document.createElement('button');
+        b.textContent = txt;
+        b.style.cssText = btnStyle;
+        if (active)   { b.style.background = 'var(--accent,#1a8fd1)'; b.style.borderColor = 'var(--accent,#1a8fd1)'; b.style.color = '#fff'; }
+        if (disabled) { b.style.opacity = '.35'; b.style.cursor = 'not-allowed'; }
+        else b.addEventListener('click', () => { curPage = page; update(); pagerEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+        pagerEl.appendChild(b);
+      };
+      const dot = () => {
+        const sp = document.createElement('span');
+        sp.textContent = '…';
+        sp.style.cssText = 'color:var(--text-muted,rgba(255,255,255,.35));padding:0 .15rem;font-size:13px;';
+        pagerEl.appendChild(sp);
+      };
+
+      mk('←', curPage - 1, false, curPage === 1);
+
+      const d = 2, lo = Math.max(2, curPage - d), hi = Math.min(pages - 1, curPage + d);
+      mk(1, 1, curPage === 1, false);
+      if (lo > 2)       dot();
+      for (let p = lo; p <= hi; p++) mk(p, p, p === curPage, false);
+      if (hi < pages - 1) dot();
+      if (pages > 1)    mk(pages, pages, curPage === pages, false);
+
+      mk('→', curPage + 1, false, curPage === pages);
+
+      const info = document.createElement('span');
+      info.style.cssText = 'color:var(--text-muted,rgba(255,255,255,.38));font-size:12px;margin-left:.5rem;white-space:nowrap;';
+      info.textContent = (s + 1) + '–' + Math.min(s + pageSize, total) + ' / ' + total;
+      pagerEl.appendChild(info);
+    }
+
+    pageSel.addEventListener('change', () => { pageSize = +pageSel.value; curPage = 1; update(); });
+    if (searchEl) searchEl.addEventListener('input', () => { curPage = 1; update(); });
+
+    update();
+  })();
 </script>
 
 </body>
