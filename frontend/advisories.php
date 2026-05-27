@@ -164,7 +164,7 @@ $generated_at = (new DateTime())->format('d.m.Y H:i:s');
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GRID — Security Advisories</title>
     <meta name="description" content="GRID Security Advisories — Browse the latest vulnerability advisories sorted by modification date.">
-    <link rel="icon" type="image/svg+xml" href="../media/logo.svg" />
+    <link rel="icon" type="image/svg+xml" href="media/logo.svg" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -180,7 +180,7 @@ $generated_at = (new DateTime())->format('d.m.Y H:i:s');
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
       <div class="logo-mark">
-        <img src="../media/logo.svg" alt="GRID Logo" style="width:32px;height:32px;filter:brightness(0) invert(1);" />
+        <img src="media/logo.svg" alt="GRID Logo" style="width:32px;height:32px;filter:brightness(0) invert(1);" />
         <span class="logo-rid" style="font-size:1.35rem;font-weight:800;letter-spacing:.04em;">GRID</span>
       </div>
       <span class="logo-sub">Global Risk Intelligence</span>
