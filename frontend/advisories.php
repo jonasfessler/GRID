@@ -1,33 +1,19 @@
 <?php
 /**
  * GRID — Advisories Feed
- * Zeigt die 100 aktuellsten Advisories (gruppiert nach WID/EUVD-Advisory-ID),
- * sortiert nach timeline.modified_at absteigend.
- *
- * Gruppierungslogik: mehrere CVE-Dokumente mit derselben WID- oder EUVD-
- * Advisory-ID zählen als EINE Advisory-Zeile (Bsp.: WID-SEC-2026-1438 → 15 CVEs).
- * Es werden immer genau 100 DISTINCT Advisories angezeigt.
+ * All data loading happens client-side via async JavaScript fetches.
+ * The page renders instantly; 100 advisories appear in the first batch
+ * while the browser continues loading more in the background.
  *
  * Stylesheet: GRID/frontend/style/advisories.css
  */
 
-// ─── Konfiguration ────────────────────────────────────────────────────────────
-define('API_BASE',    'http://localhost:8000');
-define('PER_PAGE',    200);   // API-Einträge pro Request (Max laut Doku: 200)
-define('MAX_PAGES',    50);   // Safety-Limit für Pagination
-define('API_TIMEOUT',  10);   // Sekunden
+// ─── Status call for header stats only (fast, single request) ─────────────────
+define('API_BASE', 'http://localhost:8000');
+define('API_TIMEOUT', 6);
 
-// Anzahl der DISTINCT Advisories die geladen werden (URL-Param ?show=N, Default 100)
-$show_limit = max(10, min(500, (int)($_GET['show'] ?? 100)));
-
-// ─── API-Helper ───────────────────────────────────────────────────────────────
 function fetch_api(string $url): ?array {
-    $ctx = stream_context_create([
-        'http' => [
-            'timeout'       => API_TIMEOUT,
-            'ignore_errors' => true,
-        ]
-    ]);
+    $ctx = stream_context_create(['http' => ['timeout' => API_TIMEOUT, 'ignore_errors' => true]]);
     $raw = @file_get_contents($url, false, $ctx);
     if ($raw === false) return null;
     $decoded = json_decode($raw, true);
@@ -35,139 +21,7 @@ function fetch_api(string $url): ?array {
     return $decoded;
 }
 
-// ─── Daten laden & gruppieren ─────────────────────────────────────────────────
-$groups       = [];   // [advisory_key => group_data]
-$page         = 1;
-$error        = null;
-$resp         = [];
-$fetched_raw  = 0;
-// Fetch enough raw entries so recently-modified advisories aren't missed.
-// Early group-count termination is wrong: a page of 200 *unique* CVEs fills
-// 200 groups immediately and hides advisories that appear on later pages.
-$target_raw   = max($show_limit * 5, 5 * PER_PAGE); // at least 5 full pages
-
-while ($page <= MAX_PAGES) {
-    $url  = API_BASE . '/API/advisories/'
-          . '?page_size=' . PER_PAGE
-          . '&page='      . $page
-          . '&sort_by=-timeline.modified_at';
-
-    $resp = fetch_api($url);
-
-    if ($resp === null) {
-        $error = "API nicht erreichbar. Stelle sicher, dass der GRID-Server unter "
-               . API_BASE . " läuft.";
-        break;
-    }
-    if (empty($resp['data'])) break;
-
-    foreach ($resp['data'] as $adv) {
-        // Advisory-Schlüssel: WID > EUVD > CVE-ID (Fallback)
-        $wid  = $adv['metadata']['raw_source_ids']['cert_bund'] ?? null;
-        $euvd = $adv['metadata']['raw_source_ids']['euvd']      ?? null;
-        $key  = $wid ?? $euvd ?? ($adv['cve_id'] ?? uniqid('adv_'));
-
-        $mod = $adv['timeline']['modified_at']  ?? '';
-        $pub = $adv['timeline']['published_at'] ?? '';
-
-        if (!isset($groups[$key])) {
-            $groups[$key] = [
-                'key'          => $key,
-                'title'        => $adv['title'] ?? '(Kein Titel)',
-                'cves'         => [],
-                'lead'         => $adv,
-                'modified_at'  => $mod,
-                'published_at' => $pub,
-                'sources'      => [],
-            ];
-        }
-
-        // CVE nur einmal pro Advisory aufnehmen
-        $cve = $adv['cve_id'] ?? null;
-        if ($cve && !in_array($cve, $groups[$key]['cves'], true)) {
-            $groups[$key]['cves'][] = $cve;
-        }
-
-        // Neuestes modified_at der Gruppe merken & als Lead-Dokument setzen
-        // strtotime() für robuste ISO-8601-Vergleiche (unabhängig von Timezone-Suffix)
-        if ($mod && strtotime($mod) > strtotime($groups[$key]['modified_at'] ?: '1970-01-01')) {
-            $groups[$key]['modified_at'] = $mod;
-            $groups[$key]['lead']        = $adv;
-        }
-
-        // Frühestes published_at der Gruppe merken
-        if ($pub && (!$groups[$key]['published_at'] || strtotime($pub) < strtotime($groups[$key]['published_at']))) {
-            $groups[$key]['published_at'] = $pub;
-        }
-
-        // Quellen sammeln
-        foreach (($adv['metadata']['sources'] ?? []) as $src) {
-            $groups[$key]['sources'][$src] = true;
-        }
-    }
-
-    $fetched_raw += count($resp['data']);
-
-    $has_next = $resp['pagination']['has_next'] ?? false;
-    if (!$has_next) break;
-    if ($fetched_raw >= $target_raw) break;
-    $page++;
-}
-
-// Nach modified_at absteigend sortieren – strtotime() für korrekte ISO-8601-Vergleiche
-usort($groups, function($a, $b) {
-    return strtotime($b['modified_at'] ?: '1970-01-01') <=> strtotime($a['modified_at'] ?: '1970-01-01');
-});
-$advisories = array_slice($groups, 0, $show_limit);
-$page_total = $resp['pagination']['total'] ?? 0;
-
-// Optionaler Status-Call für Header-Statistiken
 $status = fetch_api(API_BASE . '/API/status');
-
-// ─── Hilfsfunktionen ──────────────────────────────────────────────────────────
-function cvss_class(?float $s): string {
-    if ($s === null) return 'sev-default';
-    if ($s >= 9.0)   return 'sev-critical';
-    if ($s >= 7.0)   return 'sev-high';
-    if ($s >= 4.0)   return 'sev-medium';
-    return 'sev-low';
-}
-
-function cvss_label(?float $s): string {
-    if ($s === null) return 'N/A';
-    if ($s >= 9.0)   return 'CRITICAL';
-    if ($s >= 7.0)   return 'HIGH';
-    if ($s >= 4.0)   return 'MEDIUM';
-    return 'LOW';
-}
-
-function fmt_date(string $iso): string {
-    if (!$iso) return '—';
-    try { return (new DateTime($iso))->format('d.m.Y'); }
-    catch (Exception $e) { return $iso; }
-}
-
-function ago(string $iso): string {
-    if (!$iso) return '';
-    try {
-        $diff = (new DateTime())->diff(new DateTime($iso));
-        if ($diff->days === 0)  return 'Heute';
-        if ($diff->days === 1)  return 'Gestern';
-        if ($diff->days < 7)   return "vor {$diff->days} Tagen";
-        if ($diff->days < 30)  return 'vor ' . floor($diff->days / 7)  . ' Wochen';
-        if ($diff->days < 365) return 'vor ' . floor($diff->days / 30) . ' Monaten';
-        return 'vor ' . floor($diff->days / 365) . ' Jahren';
-    } catch (Exception $e) { return ''; }
-}
-
-function remediation_class(string $status): string {
-    $s = strtolower($status);
-    if (str_contains($s, 'patch') || str_contains($s, 'fix') || str_contains($s, 'update')) return 'rem-patch';
-    if (str_contains($s, 'workaround'))                                                       return 'rem-workaround';
-    if (str_contains($s, 'none') || str_contains($s, 'kein'))                                return 'rem-none';
-    return 'rem-unknown';
-}
-
 $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
 ?>
 <!DOCTYPE html>
@@ -184,8 +38,80 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
     <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="style/advisories.css">
+    <style>
+        /* ── Loading progress bar ── */
+        #loadingBar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            z-index: 9999;
+            background: var(--border);
+            overflow: hidden;
+        }
+        #loadingBar .bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), #5ec9ff, var(--accent));
+            background-size: 200% 100%;
+            animation: barShimmer 1.4s linear infinite;
+            transition: width 0.4s ease;
+            width: 0%;
+        }
+        @keyframes barShimmer {
+            0%   { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        #loadingBar.done {
+            transition: opacity 0.5s 0.3s;
+            opacity: 0;
+        }
+
+        /* ── Loading status badge ── */
+        #loadingStatus {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            transition: opacity 0.4s;
+        }
+        #loadingStatus .pulse {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: var(--accent);
+            animation: pulse 1s ease-in-out infinite;
+            flex-shrink: 0;
+        }
+        #loadingStatus.done {
+            opacity: 0;
+            pointer-events: none;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%       { opacity: 0.4; transform: scale(0.7); }
+        }
+
+        /* ── Skeleton shimmer rows ── */
+        .skeleton-row td {
+            padding: 14px;
+        }
+        .skeleton-cell {
+            height: 14px;
+            border-radius: 4px;
+            background: linear-gradient(90deg, var(--bg-card-alt) 25%, var(--border) 50%, var(--bg-card-alt) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+        }
+        @keyframes shimmer {
+            0%   { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+    </style>
 </head>
 <body>
+
+<!-- Top loading bar -->
+<div id="loadingBar"><div class="bar-fill" id="barFill"></div></div>
 
 <div class="app" id="app">
 
@@ -219,9 +145,7 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
         <a href="advisories.php" class="nav-item active" data-page="vuln-all">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16.5" r=".5" fill="currentColor"/></svg>
           <span>Alle</span>
-          <?php if ($page_total > 0): ?>
-          <span class="nav-count"><?= number_format($page_total) ?></span>
-          <?php endif; ?>
+          <span class="nav-count" id="navTotalCount"></span>
         </a>
         <a href="#" class="nav-item nav-item--danger" data-page="vuln-high">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v5"/><circle cx="12" cy="17.5" r=".5" fill="currentColor"/></svg>
@@ -316,40 +240,32 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
         <h1 class="section-title" style="margin:0;">Security Advisories</h1>
         <div style="display:flex;flex-direction:column;gap:.35rem;margin-left:auto;align-items:flex-end;">
           <span class="section-meta">
-            <?= count($advisories) ?> geladen von <?= number_format($page_total) ?> &nbsp;·&nbsp; Generiert: <span data-fmt-datetime="<?= htmlspecialchars($generated_at_iso) ?>">…</span>
+            <span id="loadedCount">0</span> geladen
+            &nbsp;·&nbsp;
+            <span id="totalCountMeta">…</span> gesamt
+            &nbsp;·&nbsp;
+            Generiert: <span data-fmt-datetime="<?= htmlspecialchars($generated_at_iso) ?>">…</span>
           </span>
           <div style="display:flex;align-items:center;gap:.5rem;font-size:12px;color:var(--text-muted);">
-            <label for="showLimit" style="white-space:nowrap;">Gesamt laden:</label>
-            <select id="showLimit" style="background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;padding:.25rem .5rem;font-size:12px;cursor:pointer;" onchange="location.href='advisories.php?show='+this.value">
-              <?php foreach ([10,25,50,100,200,500] as $opt): ?>
-              <option value="<?= $opt ?>"<?= $opt === $show_limit ? ' selected' : '' ?>><?= $opt ?></option>
-              <?php endforeach; ?>
-            </select>
+            <div id="loadingStatus">
+              <span class="pulse"></span>
+              <span id="loadingText">Lade Advisories…</span>
+            </div>
             <span style="opacity:.3;">|</span>
             <label for="pageSizeSelect" style="white-space:nowrap;">Pro Seite:</label>
             <select id="pageSizeSelect" style="background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;padding:.25rem .5rem;font-size:12px;cursor:pointer;">
               <option value="10">10</option>
-              <option value="25" selected>25</option>
+              <option value="25">25</option>
               <option value="50">50</option>
-              <option value="100">100</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
             </select>
           </div>
         </div>
       </div>
 
-      <?php if ($error): ?>
-      <div class="error-banner">
-        <strong>⚠ API-Fehler:</strong> <?= htmlspecialchars($error) ?>
-      </div>
-      <?php endif; ?>
+      <div id="errorBanner" class="error-banner" style="display:none;"></div>
 
-      <?php if (empty($advisories) && !$error): ?>
-      <div class="error-banner">
-        <strong>Keine Daten:</strong> Die API hat keine Advisories zurückgegeben.
-      </div>
-      <?php endif; ?>
-
-      <?php if (!empty($advisories)): ?>
       <div class="table-card">
         <div class="table-scroll">
           <table class="adv-table">
@@ -376,115 +292,27 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
               </tr>
             </thead>
             <tbody id="advisoryTableBody">
-            <?php foreach ($advisories as $i => $grp):
-                $lead    = $grp['lead'];
-                $score   = $lead['metrics']['cvss_v3']['base_score'] ?? null;
-                $sev     = cvss_class($score);
-                $cves    = $grp['cves'];
-                $extra   = count($cves) - 2;
-                $rem     = $lead['remediation']['status'] ?? '';
-                $sources = array_keys($grp['sources']);
-                $row_id  = 'row-' . $i;
-
-                $wid  = $lead['metadata']['raw_source_ids']['cert_bund'] ?? null;
-                $euvd = $lead['metadata']['raw_source_ids']['euvd']      ?? null;
-            ?>
-            <tr>
-
-              <!-- # -->
-              <td class="td-num"><?= $i + 1 ?></td>
-
-              <!-- Advisory-ID -->
-              <td>
-                <?php if ($wid): ?>
-                  <span class="adv-id-label">WID</span>
-                  <span class="adv-id"><?= htmlspecialchars($wid) ?></span>
-                <?php elseif ($euvd): ?>
-                  <span class="adv-id-label">EUVD</span>
-                  <span class="adv-id"><?= htmlspecialchars($euvd) ?></span>
-                <?php else: ?>
-                  <span class="adv-id-label">CVE</span>
-                  <span class="adv-id"><?= htmlspecialchars($cves[0] ?? '—') ?></span>
-                <?php endif; ?>
-              </td>
-
-              <!-- Titel + Kurzbeschreibung + Erstveröffentlichung -->
-              <td>
-                <div class="adv-title"><?= htmlspecialchars($grp['title']) ?></div>
-                <?php if (!empty($lead['description'])): ?>
-                  <div class="adv-desc"><?= htmlspecialchars($lead['description']) ?></div>
-                <?php endif; ?>
-                <?php if ($grp['published_at']): ?>
-                  <div class="adv-published">Veröffentlicht: <span data-fmt-date="<?= htmlspecialchars($grp['published_at']) ?>">…</span></div>
-                <?php endif; ?>
-              </td>
-
-              <!-- CVEs (erste 2 sichtbar, Rest ausklappbar) -->
-              <td>
-                <div class="cve-list" id="<?= $row_id ?>">
-                  <?php for ($c = 0; $c < min(2, count($cves)); $c++): ?>
-                    <span class="cve-tag"><?= htmlspecialchars($cves[$c]) ?></span>
-                  <?php endfor; ?>
-
-                  <?php if ($extra > 0): ?>
-                    <?php for ($c = 2; $c < count($cves); $c++): ?>
-                      <span class="cve-tag cve-hidden" data-row="<?= $row_id ?>">
-                        <?= htmlspecialchars($cves[$c]) ?>
-                      </span>
-                    <?php endfor; ?>
-                    <span class="cve-more" id="btn-<?= $row_id ?>"
-                          onclick="toggleCves('<?= $row_id ?>')">
-                      +<?= $extra ?> weitere
-                    </span>
-                  <?php endif; ?>
-                </div>
-              </td>
-
-              <!-- CVSS Score + Severity-Badge -->
-              <td>
-                <div class="cvss-wrap <?= $sev ?>">
-                  <span class="cvss-score">
-                    <?= $score !== null ? number_format((float)$score, 1) : '—' ?>
-                  </span>
-                  <span class="cvss-badge"><?= cvss_label($score) ?></span>
-                </div>
-              </td>
-
-              <!-- Quelle -->
-              <td>
-                <div class="src-badges">
-                  <?php foreach ($sources as $src): ?>
-                    <span class="src-badge src-<?= htmlspecialchars($src) ?>">
-                      <?= htmlspecialchars($src) ?>
-                    </span>
-                  <?php endforeach; ?>
-                </div>
-              </td>
-
-              <!-- Aktualisiert -->
-              <td>
-                <span class="mod-date" data-fmt-date="<?= htmlspecialchars($grp['modified_at']) ?>">…</span>
-                <span class="mod-ago" data-fmt-ago="<?= htmlspecialchars($grp['modified_at']) ?>">…</span>
-              </td>
-
-              <!-- Remediation-Status -->
-              <td>
-                <?php if ($rem): ?>
-                  <span class="rem-badge <?= remediation_class($rem) ?>">
-                    <?= htmlspecialchars($rem) ?>
-                  </span>
-                <?php else: ?>
-                  <span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace;">—</span>
-                <?php endif; ?>
-              </td>
-
-            </tr>
-            <?php endforeach; ?>
+              <!-- Skeleton rows shown while loading -->
+              <tr class="skeleton-row" id="skeletonRows">
+                <td><div class="skeleton-cell" style="width:20px;margin:auto;"></div></td>
+                <td><div class="skeleton-cell" style="width:140px;"></div></td>
+                <td>
+                  <div class="skeleton-cell" style="width:85%;margin-bottom:6px;"></div>
+                  <div class="skeleton-cell" style="width:60%;height:10px;"></div>
+                </td>
+                <td><div class="skeleton-cell" style="width:100px;"></div></td>
+                <td><div class="skeleton-cell" style="width:50px;margin:auto;"></div></td>
+                <td><div class="skeleton-cell" style="width:45px;"></div></td>
+                <td>
+                  <div class="skeleton-cell" style="width:80px;margin-bottom:4px;"></div>
+                  <div class="skeleton-cell" style="width:55px;height:10px;"></div>
+                </td>
+                <td><div class="skeleton-cell" style="width:90px;"></div></td>
+              </tr>
             </tbody>
           </table>
         </div>
       </div>
-      <?php endif; ?>
 
       <div id="pagination" style="display:flex;align-items:center;justify-content:center;gap:.35rem;padding:1.25rem 2rem .5rem;flex-wrap:wrap;"></div>
 
@@ -492,7 +320,7 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
         <span>GRID — Global Risk Intelligence Dashboard</span>
         <span>
           Sortierung: <code>timeline.modified_at</code> ↓ &nbsp;·&nbsp; Gruppiert nach Advisory-ID
-          &nbsp;·&nbsp; <?= count($advisories) ?> / <?= number_format($page_total) ?> geladen
+          &nbsp;·&nbsp; <span id="footerLoaded">0</span> geladen
         </span>
       </footer>
 
@@ -501,155 +329,425 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
 </div><!-- /app -->
 
 <script>
-  /* ── SIDEBAR TOGGLE ── */
-  document.getElementById('sidebarToggle').addEventListener('click', () => {
-    document.getElementById('sidebar').classList.toggle('collapsed');
-    document.getElementById('app').classList.toggle('sidebar-collapsed');
-  });
+/* ════════════════════════════════════════════════════════════════════
+   GRID — Advisories: Async Progressive Loader
+   ════════════════════════════════════════════════════════════════════ */
 
-  /* ── THEME TOGGLE ── */
-  document.getElementById('themeToggle').addEventListener('click', () => {
-    const html = document.documentElement;
-    const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
-    html.dataset.theme = next;
-    localStorage.setItem('grid-theme', next);
-  });
+const API_BASE      = 'http://localhost:8000';
+const API_PAGE_SIZE = 200;   // raw items per API request (max allowed)
+const BATCH_TARGET  = 100;   // distinct advisories to collect before first render
+const SORT_BY       = '-timeline.modified_at';
 
-  /* Load saved theme preference */
-  (function () {
-    const saved = localStorage.getItem('grid-theme');
-    if (saved) document.documentElement.dataset.theme = saved;
-  })();
+/* ── State ── */
+const groups     = new Map();   // key → group object
+let   allRows    = [];          // rendered <tr> elements in order
+let   curPage    = 1;
+let   pageSize   = 100;
+let   apiPage    = 1;
+let   apiTotal   = 0;
+let   loading    = false;
+let   done       = false;
+let   rowCursor  = 0;           // next sequential row number
 
-  /* ── SEARCH + PAGINATION (unified, browser-timezone-aware) ── */
+/* ── DOM refs ── */
+const tbody        = document.getElementById('advisoryTableBody');
+const pagerEl      = document.getElementById('pagination');
+const pageSel      = document.getElementById('pageSizeSelect');
+const searchEl     = document.getElementById('searchInput');
+const loadedEl     = document.getElementById('loadedCount');
+const totalMeta    = document.getElementById('totalCountMeta');
+const footerLoaded = document.getElementById('footerLoaded');
+const navCount     = document.getElementById('navTotalCount');
+const loadStatus   = document.getElementById('loadingStatus');
+const loadText     = document.getElementById('loadingText');
+const barFill      = document.getElementById('barFill');
+const loadingBar   = document.getElementById('loadingBar');
+const errorBanner  = document.getElementById('errorBanner');
+const skeleton     = document.getElementById('skeletonRows');
 
-  /* ── CVE-TAGS TOGGLE ── */
-  function toggleCves(rowId) {
-    const hidden  = document.querySelectorAll('[data-row="' + rowId + '"]');
-    const moreBtn = document.getElementById('btn-' + rowId);
-    const isOpen  = moreBtn.classList.contains('open');
-    hidden.forEach(el => el.classList.toggle('visible', !isOpen));
-    moreBtn.classList.toggle('open', !isOpen);
-    moreBtn.textContent = isOpen
-      ? '+' + hidden.length + ' weitere'
-      : 'Weniger ▲';
-  }
+/* ════════════════════════════════════════════════════════════════════
+   HELPERS
+   ════════════════════════════════════════════════════════════════════ */
+const _dateFmt = new Intl.DateTimeFormat(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' });
+const _dtFmt   = new Intl.DateTimeFormat(undefined, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-  /* ── CLIENT-SIDE DATE FORMATTING (browser timezone) ── */
-  const _dateFmt = new Intl.DateTimeFormat(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' });
-  const _dtFmt   = new Intl.DateTimeFormat(undefined, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-  function fmtDate(iso) {
+function fmtDate(iso) {
     if (!iso) return '—';
     try { return _dateFmt.format(new Date(iso)); } catch(e) { return iso; }
-  }
-
-  function fmtDatetime(iso) {
+}
+function fmtDatetime(iso) {
     if (!iso) return '—';
     try { return _dtFmt.format(new Date(iso)); } catch(e) { return iso; }
-  }
-
-  function ago(iso) {
+}
+function ago(iso) {
     if (!iso) return '';
     try {
-      const d   = new Date(iso);
-      const now = new Date();
-      // Strip to local calendar date (no time) for accurate day comparison
-      const dLocal   = new Date(d.getFullYear(),   d.getMonth(),   d.getDate());
-      const nowLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const days = Math.round((nowLocal - dLocal) / 86400000);
-      if (days === 0)  return 'Heute';
-      if (days === 1)  return 'Gestern';
-      if (days < 7)   return `vor ${days} Tagen`;
-      if (days < 30)  return 'vor ' + Math.floor(days / 7)  + ' Wochen';
-      if (days < 365) return 'vor ' + Math.floor(days / 30) + ' Monaten';
-      return 'vor ' + Math.floor(days / 365) + ' Jahren';
+        const d = new Date(iso), now = new Date();
+        const dL   = new Date(d.getFullYear(),   d.getMonth(),   d.getDate());
+        const nowL = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const days = Math.round((nowL - dL) / 86400000);
+        if (days === 0)  return 'Heute';
+        if (days === 1)  return 'Gestern';
+        if (days < 7)   return `vor ${days} Tagen`;
+        if (days < 30)  return 'vor ' + Math.floor(days / 7)  + ' Wochen';
+        if (days < 365) return 'vor ' + Math.floor(days / 30) + ' Monaten';
+        return 'vor ' + Math.floor(days / 365) + ' Jahren';
     } catch(e) { return ''; }
-  }
+}
+function cvssClass(s) {
+    if (s == null) return 'sev-default';
+    if (s >= 9.0)  return 'sev-critical';
+    if (s >= 7.0)  return 'sev-high';
+    if (s >= 4.0)  return 'sev-medium';
+    return 'sev-low';
+}
+function cvssLabel(s) {
+    if (s == null) return 'N/A';
+    if (s >= 9.0)  return 'CRITICAL';
+    if (s >= 7.0)  return 'HIGH';
+    if (s >= 4.0)  return 'MEDIUM';
+    return 'LOW';
+}
+function remClass(status) {
+    const s = (status || '').toLowerCase();
+    if (s.includes('patch') || s.includes('fix') || s.includes('update')) return 'rem-patch';
+    if (s.includes('workaround'))                                           return 'rem-workaround';
+    if (s.includes('none') || s.includes('kein'))                          return 'rem-none';
+    return 'rem-unknown';
+}
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
 
-  document.querySelectorAll('[data-fmt-date]').forEach(el => {
-    el.textContent = fmtDate(el.dataset.fmtDate);
-  });
-  document.querySelectorAll('[data-fmt-datetime]').forEach(el => {
-    el.textContent = fmtDatetime(el.dataset.fmtDatetime);
-  });
-  document.querySelectorAll('[data-fmt-ago]').forEach(el => {
-    el.textContent = ago(el.dataset.fmtAgo);
-  });
+/* ════════════════════════════════════════════════════════════════════
+   GROUP LOGIC (mirrors PHP dedup logic)
+   ════════════════════════════════════════════════════════════════════ */
+function mergeIntoGroups(items) {
+    for (const adv of items) {
+        const wid  = adv?.metadata?.raw_source_ids?.cert_bund ?? null;
+        const euvd = adv?.metadata?.raw_source_ids?.euvd      ?? null;
+        const key  = wid ?? euvd ?? (adv.cve_id ?? ('adv_' + Math.random()));
+        const mod  = adv?.timeline?.modified_at  ?? '';
+        const pub  = adv?.timeline?.published_at ?? '';
 
-  /* ── PAGINATION ENGINE ── */
-  (function () {
-    const tbody    = document.getElementById('advisoryTableBody');
-    const pagerEl  = document.getElementById('pagination');
-    const pageSel  = document.getElementById('pageSizeSelect');
-    const searchEl = document.getElementById('searchInput');
-    if (!tbody || !pagerEl || !pageSel) return;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                key, title: adv.title ?? '(Kein Titel)',
+                cves: [], lead: adv,
+                modified_at: mod, published_at: pub,
+                sources: new Set(),
+                rendered: false,
+            });
+        }
+        const grp = groups.get(key);
 
-    let pageSize = +pageSel.value;
-    let curPage  = 1;
-    const allRows = Array.from(tbody.querySelectorAll('tr'));
+        // CVE dedup
+        const cve = adv.cve_id ?? null;
+        if (cve && !grp.cves.includes(cve)) grp.cves.push(cve);
 
-    const btnStyle = 'padding:.3rem .7rem;border-radius:6px;border:1px solid var(--border,rgba(255,255,255,.12));' +
-      'background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);cursor:pointer;font-size:13px;' +
-      'transition:background .15s,border-color .15s;min-width:2.2rem;text-align:center;';
+        // Newest modified_at wins as lead
+        if (mod && (!grp.modified_at || new Date(mod) > new Date(grp.modified_at))) {
+            grp.modified_at = mod;
+            grp.lead = adv;
+        }
+        // Earliest published_at
+        if (pub && (!grp.published_at || new Date(pub) < new Date(grp.published_at))) {
+            grp.published_at = pub;
+        }
+        // Sources
+        for (const src of (adv?.metadata?.sources ?? [])) grp.sources.add(src);
+    }
+}
 
-    function filtered() {
-      const q = (searchEl?.value || '').toLowerCase().trim();
-      return q ? allRows.filter(r => r.textContent.toLowerCase().includes(q)) : allRows;
+/* ════════════════════════════════════════════════════════════════════
+   ROW BUILDER
+   ════════════════════════════════════════════════════════════════════ */
+function buildRow(grp, rowNum) {
+    const lead    = grp.lead;
+    const score   = lead?.metrics?.cvss_v3?.base_score ?? null;
+    const sev     = cvssClass(score);
+    const cves    = grp.cves;
+    const extra   = cves.length - 2;
+    const rem     = lead?.remediation?.status ?? '';
+    const sources = [...grp.sources];
+    const wid     = lead?.metadata?.raw_source_ids?.cert_bund ?? null;
+    const euvd    = lead?.metadata?.raw_source_ids?.euvd      ?? null;
+    const rowId   = 'row-' + rowNum;
+
+    /* advisory-id cell */
+    let idCell = '';
+    if (wid)       idCell = `<span class="adv-id-label">WID</span><span class="adv-id">${esc(wid)}</span>`;
+    else if (euvd) idCell = `<span class="adv-id-label">EUVD</span><span class="adv-id">${esc(euvd)}</span>`;
+    else           idCell = `<span class="adv-id-label">CVE</span><span class="adv-id">${esc(cves[0] ?? '—')}</span>`;
+
+    /* CVE tags */
+    let cveTags = cves.slice(0, 2).map(c => `<span class="cve-tag">${esc(c)}</span>`).join('');
+    if (extra > 0) {
+        const hidden = cves.slice(2).map(c => `<span class="cve-tag cve-hidden" data-row="${rowId}">${esc(c)}</span>`).join('');
+        cveTags += hidden + `<span class="cve-more" id="btn-${rowId}" onclick="toggleCves('${rowId}')">+${extra} weitere</span>`;
     }
 
-    function update() {
-      const rows  = filtered();
-      const pages = Math.max(1, Math.ceil(rows.length / pageSize));
-      curPage = Math.min(curPage, pages);
-      const s = (curPage - 1) * pageSize;
-      allRows.forEach(r => r.style.display = 'none');
-      rows.slice(s, s + pageSize).forEach(r => r.style.display = '');
-      buildPager(rows.length, pages, s);
+    /* source badges */
+    const srcBadges = sources.map(s => `<span class="src-badge src-${esc(s)}">${esc(s)}</span>`).join('');
+
+    /* remediation */
+    const remHtml = rem
+        ? `<span class="rem-badge ${remClass(rem)}">${esc(rem)}</span>`
+        : `<span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace;">—</span>`;
+
+    /* description */
+    const desc = lead.description ? `<div class="adv-desc">${esc(lead.description)}</div>` : '';
+    const pub  = grp.published_at ? `<div class="adv-published">Veröffentlicht: <span data-fmt-date="${esc(grp.published_at)}">…</span></div>` : '';
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="td-num">${rowNum}</td>
+      <td>${idCell}</td>
+      <td>
+        <div class="adv-title">${esc(grp.title)}</div>
+        ${desc}${pub}
+      </td>
+      <td><div class="cve-list" id="${rowId}">${cveTags}</div></td>
+      <td>
+        <div class="cvss-wrap ${sev}">
+          <span class="cvss-score">${score != null ? score.toFixed(1) : '—'}</span>
+          <span class="cvss-badge">${cvssLabel(score)}</span>
+        </div>
+      </td>
+      <td><div class="src-badges">${srcBadges}</div></td>
+      <td>
+        <span class="mod-date" data-fmt-date="${esc(grp.modified_at)}">…</span>
+        <span class="mod-ago"  data-fmt-ago="${esc(grp.modified_at)}">…</span>
+      </td>
+      <td>${remHtml}</td>
+    `;
+
+    /* format date elements in this row */
+    tr.querySelectorAll('[data-fmt-date]').forEach(el => el.textContent = fmtDate(el.dataset.fmtDate));
+    tr.querySelectorAll('[data-fmt-ago]').forEach(el  => el.textContent = ago(el.dataset.fmtAgo));
+
+    return tr;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   RENDER NEW GROUPS (append unrendered groups sorted by modified_at)
+   ════════════════════════════════════════════════════════════════════ */
+function renderNewGroups() {
+    /* collect all groups, sort by modified_at desc, keep stable order */
+    const sorted = [...groups.values()].sort((a, b) =>
+        new Date(b.modified_at || '1970') - new Date(a.modified_at || '1970')
+    );
+
+    /* remove skeleton */
+    if (skeleton && skeleton.parentNode) skeleton.remove();
+
+    /* rebuild tbody fully in document-order to maintain sort */
+    /* Only do a full rebuild when row count changes significantly; otherwise append. */
+    /* Strategy: track which groups already have a <tr> in allRows array. */
+    /* For newly-seen groups (rendered=false), build & insert at correct sorted position. */
+
+    const newGroups = sorted.filter(g => !g.rendered);
+    if (newGroups.length === 0) return;
+
+    /* We rebuild the full sorted list by clearing tbody and re-inserting.
+       Use a DocumentFragment for performance. */
+    rowCursor = 0;
+    const frag = document.createDocumentFragment();
+    allRows = [];
+    for (const grp of sorted) {
+        grp.rendered = true;
+        rowCursor++;
+        const tr = buildRow(grp, rowCursor);
+        grp._tr = tr;
+        frag.appendChild(tr);
+        allRows.push(tr);
     }
+    tbody.innerHTML = '';
+    tbody.appendChild(frag);
 
-    function buildPager(total, pages, s) {
-      pagerEl.innerHTML = '';
-      if (pages <= 1) return;
+    updateStats();
+    applyPagination();
+}
 
-      const mk = (txt, page, active, disabled) => {
+/* ════════════════════════════════════════════════════════════════════
+   STATS & PROGRESS
+   ════════════════════════════════════════════════════════════════════ */
+function updateStats() {
+    const n = groups.size;
+    loadedEl.textContent   = n.toLocaleString();
+    footerLoaded.textContent = n.toLocaleString();
+    if (apiTotal > 0) {
+        totalMeta.textContent = apiTotal.toLocaleString();
+        navCount.textContent  = apiTotal.toLocaleString();
+        /* progress bar based on raw API pages fetched */
+        const pct = Math.min(100, Math.round(((apiPage - 1) * API_PAGE_SIZE / apiTotal) * 100));
+        barFill.style.width = pct + '%';
+    }
+    loadText.textContent = done
+        ? `${n.toLocaleString()} Advisories geladen`
+        : `${n.toLocaleString()} geladen, lade mehr…`;
+}
+
+function markDone() {
+    done = true;
+    loadStatus.classList.add('done');
+    loadingBar.classList.add('done');
+    barFill.style.width = '100%';
+    updateStats();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   PAGINATION ENGINE
+   ════════════════════════════════════════════════════════════════════ */
+const btnStyle = 'padding:.3rem .7rem;border-radius:6px;border:1px solid var(--border,rgba(255,255,255,.12));' +
+    'background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);cursor:pointer;font-size:13px;' +
+    'transition:background .15s,border-color .15s;min-width:2.2rem;text-align:center;';
+
+function filtered() {
+    const q = (searchEl?.value || '').toLowerCase().trim();
+    return q ? allRows.filter(r => r.textContent.toLowerCase().includes(q)) : allRows;
+}
+
+function applyPagination() {
+    const rows  = filtered();
+    const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+    curPage = Math.min(curPage, pages);
+    const s = (curPage - 1) * pageSize;
+    allRows.forEach(r => r.style.display = 'none');
+    rows.slice(s, s + pageSize).forEach(r => r.style.display = '');
+    buildPager(rows.length, pages, s);
+}
+
+function buildPager(total, pages, s) {
+    pagerEl.innerHTML = '';
+    if (pages <= 1) return;
+
+    const mk = (txt, page, active, disabled) => {
         const b = document.createElement('button');
         b.textContent = txt;
         b.style.cssText = btnStyle;
         if (active)   { b.style.background = 'var(--accent,#1a8fd1)'; b.style.borderColor = 'var(--accent,#1a8fd1)'; b.style.color = '#fff'; }
         if (disabled) { b.style.opacity = '.35'; b.style.cursor = 'not-allowed'; }
-        else b.addEventListener('click', () => { curPage = page; update(); pagerEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+        else b.addEventListener('click', () => { curPage = page; applyPagination(); pagerEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
         pagerEl.appendChild(b);
-      };
-      const dot = () => {
+    };
+    const dot = () => {
         const sp = document.createElement('span');
         sp.textContent = '…';
         sp.style.cssText = 'color:var(--text-muted,rgba(255,255,255,.35));padding:0 .15rem;font-size:13px;';
         pagerEl.appendChild(sp);
-      };
+    };
 
-      mk('←', curPage - 1, false, curPage === 1);
+    mk('←', curPage - 1, false, curPage === 1);
+    const d = 2, lo = Math.max(2, curPage - d), hi = Math.min(pages - 1, curPage + d);
+    mk(1, 1, curPage === 1, false);
+    if (lo > 2)        dot();
+    for (let p = lo; p <= hi; p++) mk(p, p, p === curPage, false);
+    if (hi < pages - 1) dot();
+    if (pages > 1)     mk(pages, pages, curPage === pages, false);
+    mk('→', curPage + 1, false, curPage === pages);
 
-      const d = 2, lo = Math.max(2, curPage - d), hi = Math.min(pages - 1, curPage + d);
-      mk(1, 1, curPage === 1, false);
-      if (lo > 2)       dot();
-      for (let p = lo; p <= hi; p++) mk(p, p, p === curPage, false);
-      if (hi < pages - 1) dot();
-      if (pages > 1)    mk(pages, pages, curPage === pages, false);
+    const info = document.createElement('span');
+    info.style.cssText = 'color:var(--text-muted,rgba(255,255,255,.38));font-size:12px;margin-left:.5rem;white-space:nowrap;';
+    info.textContent = (s + 1) + '–' + Math.min(s + pageSize, total) + ' / ' + total;
+    pagerEl.appendChild(info);
+}
 
-      mk('→', curPage + 1, false, curPage === pages);
+/* ════════════════════════════════════════════════════════════════════
+   ASYNC LOADER
+   ════════════════════════════════════════════════════════════════════ */
+async function loadBatch() {
+    if (loading || done) return;
+    loading = true;
 
-      const info = document.createElement('span');
-      info.style.cssText = 'color:var(--text-muted,rgba(255,255,255,.38));font-size:12px;margin-left:.5rem;white-space:nowrap;';
-      info.textContent = (s + 1) + '–' + Math.min(s + pageSize, total) + ' / ' + total;
-      pagerEl.appendChild(info);
+    try {
+        const url = `${API_BASE}/API/advisories/?page_size=${API_PAGE_SIZE}&page=${apiPage}&sort_by=${SORT_BY}`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+
+        const items = json.data ?? [];
+        apiTotal = json.pagination?.total ?? apiTotal;
+        const hasNext = json.pagination?.has_next ?? false;
+
+        mergeIntoGroups(items);
+
+        const isFirstBatch = apiPage === 1;
+        apiPage++;
+
+        /* render immediately if this is the first batch OR we have enough */
+        if (isFirstBatch || groups.size % 50 === 0) {
+            renderNewGroups();
+        }
+
+        loading = false;
+
+        if (!hasNext || items.length === 0) {
+            /* Final render pass to catch any remaining groups */
+            renderNewGroups();
+            markDone();
+            return;
+        }
+
+        /* Continue loading in the background with a tiny yield so UI stays responsive */
+        setTimeout(loadBatch, 0);
+
+    } catch (err) {
+        loading = false;
+        console.error('Advisory fetch error:', err);
+        if (groups.size === 0) {
+            errorBanner.style.display = '';
+            errorBanner.innerHTML = `<strong>⚠ API-Fehler:</strong> ${esc(err.message)} — Stelle sicher, dass der GRID-Server unter ${API_BASE} läuft.`;
+            if (skeleton && skeleton.parentNode) skeleton.remove();
+        }
+        markDone();
     }
+}
 
-    pageSel.addEventListener('change', () => { pageSize = +pageSel.value; curPage = 1; update(); });
-    if (searchEl) searchEl.addEventListener('input', () => { curPage = 1; update(); });
+/* ════════════════════════════════════════════════════════════════════
+   SIDEBAR / THEME TOGGLES
+   ════════════════════════════════════════════════════════════════════ */
+document.getElementById('sidebarToggle').addEventListener('click', () => {
+    document.getElementById('sidebar').classList.toggle('collapsed');
+    document.getElementById('app').classList.toggle('sidebar-collapsed');
+});
 
-    update();
-  })();
+document.getElementById('themeToggle').addEventListener('click', () => {
+    const html = document.documentElement;
+    const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
+    html.dataset.theme = next;
+    localStorage.setItem('grid-theme', next);
+});
+
+(function () {
+    const saved = localStorage.getItem('grid-theme');
+    if (saved) document.documentElement.dataset.theme = saved;
+})();
+
+/* ── Date formatting for static elements ── */
+document.querySelectorAll('[data-fmt-datetime]').forEach(el => el.textContent = fmtDatetime(el.dataset.fmtDatetime));
+
+/* ── CVE toggle ── */
+function toggleCves(rowId) {
+    const hidden  = document.querySelectorAll('[data-row="' + rowId + '"]');
+    const moreBtn = document.getElementById('btn-' + rowId);
+    if (!moreBtn) return;
+    const isOpen  = moreBtn.classList.contains('open');
+    hidden.forEach(el => el.classList.toggle('visible', !isOpen));
+    moreBtn.classList.toggle('open', !isOpen);
+    moreBtn.textContent = isOpen ? '+' + hidden.length + ' weitere' : 'Weniger ▲';
+}
+
+/* ── Pagination controls ── */
+pageSel.addEventListener('change', () => { pageSize = +pageSel.value; curPage = 1; applyPagination(); });
+if (searchEl) searchEl.addEventListener('input', () => { curPage = 1; applyPagination(); });
+
+/* ════════════════════════════════════════════════════════════════════
+   BOOT
+   ════════════════════════════════════════════════════════════════════ */
+loadBatch();
 </script>
 
 </body>
