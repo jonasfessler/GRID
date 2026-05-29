@@ -1,0 +1,8 @@
+# GRID API v2.0 — Python dependencies
+# Install:  pip install -r requirements.txt
+
+fastapi[standard]>=0.111.0
+motor>=3.4.0
+pydantic>=2.0.0
+rapidfuzz>=3.0.0
+uvicorn[standard]>=0.29.0
