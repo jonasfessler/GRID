@@ -335,14 +335,12 @@ async def list_advisories(
 
     skip = (page - 1) * page_size
 
-    # In fuzzy mode: bypass pagination — fetch all candidates, rank in Python
-    mongo_skip  = 0          if fuzzy else skip
-    mongo_limit = min(_FUZZY_CANDIDATE_CAP, page_size * 10) if fuzzy else page_size
-
     col = col_advisories()
 
     # ── Build aggregation pipeline ──────────────────────────────────────────
-    # Single round-trip via $facet: one branch counts, the other retrieves data.
+    # Groups individual CVE documents into advisory groups (by cert_bund WID
+    # or euvd ID or cve_id) so that pagination counts unique advisories,
+    # not individual CVE documents.
     pipeline: list[dict] = []
 
     # Stage 1 — filter
@@ -352,21 +350,66 @@ async def list_advisories(
     if text_active:
         pipeline.append({"$addFields": {"_score": {"$meta": "textScore"}}})
 
-    # Stage 3 — $facet: count + paginated data in one shot
-    sort_doc: dict
+    # Stage 3 — pre-group sort so $first/$last picks are deterministic
+    pre_sort: dict
     if use_text_sort:
-        sort_doc = {"_score": -1}
+        pre_sort = {"_score": -1}
     else:
-        sort_doc = {sort_field: sort_dir}
-        # Secondary sort by text score when search is active (breaks score ties)
+        pre_sort = {"timeline.modified_at": -1}
         if text_active:
-            sort_doc["_score"] = -1
+            pre_sort["_score"] = -1
+    pipeline.append({"$sort": pre_sort})
 
+    # Stage 4 — $group by advisory key (cert_bund → euvd → cve_id fallback)
+    # Produces one document per unique advisory.
+    pipeline.append({
+        "$group": {
+            "_id": {
+                "$ifNull": [
+                    "$metadata.raw_source_ids.cert_bund",
+                    {"$ifNull": [
+                        "$metadata.raw_source_ids.euvd",
+                        "$cve_id",
+                    ]},
+                ]
+            },
+            "cves":         {"$push": "$cve_id"},
+            "lead":         {"$first": "$$ROOT"},
+            "modified_at":  {"$max": "$timeline.modified_at"},
+            "published_at": {"$min": "$timeline.published_at"},
+            "sources":      {"$addToSet": "$metadata.sources"},
+            "_max_score":   {"$max": {"$ifNull": ["$_score", 0]}},
+        }
+    })
+
+    # Stage 5 — sort the grouped advisories
+    group_sort: dict
+    if use_text_sort:
+        group_sort = {"_max_score": -1}
+    else:
+        # Map advisory-level sort fields to the grouped doc shape
+        _GROUP_SORT_MAP = {
+            "timeline.modified_at":       "modified_at",
+            "timeline.published_at":      "published_at",
+            "metrics.cvss_v3.base_score": "lead.metrics.cvss_v3.base_score",
+            "metrics.epss":               "lead.metrics.epss",
+            "cve_id":                     "lead.cve_id",
+            "title":                      "lead.title",
+        }
+        mapped_field = _GROUP_SORT_MAP.get(sort_field, "modified_at")
+        group_sort = {mapped_field: sort_dir}
+        if text_active:
+            group_sort["_max_score"] = -1
+
+    # In fuzzy mode: fetch extra candidates for re-ranking in Python
+    mongo_skip  = 0          if fuzzy else skip
+    mongo_limit = min(_FUZZY_CANDIDATE_CAP, page_size * 10) if fuzzy else page_size
+
+    # Stage 6 — $facet: count + paginated data in one shot
     data_pipeline: list[dict] = [
-        {"$sort": sort_doc},
+        {"$sort": group_sort},
         {"$skip": mongo_skip},
         {"$limit": mongo_limit},
-        {"$project": {**_LIST_PROJECTION}},   # _score excluded implicitly
     ]
 
     pipeline.append({
@@ -379,16 +422,53 @@ async def list_advisories(
     raw = await col.aggregate(pipeline, allowDiskUse=True).to_list(1)
     facet  = raw[0] if raw else {"meta": [], "items": []}
     total  = facet["meta"][0]["total"] if facet["meta"] else 0
-    docs   = facet["items"]
+    groups = facet["items"]
 
     # ── Fuzzy post-processing ───────────────────────────────────────────────
-    if fuzzy and search and docs:
-        ranked = _fuzzy_rank(search, docs)
-        total  = len(ranked)          # total is now the fuzzy-filtered count
-        docs   = ranked[skip : skip + page_size]
+    if fuzzy and search and groups:
+        # Re-rank using the lead document of each group
+        lead_docs = [g["lead"] for g in groups]
+        ranked = _fuzzy_rank(search, lead_docs)
+        ranked_ids = {doc.get("cve_id") for doc in ranked}
+        groups = [g for g in groups if g["lead"].get("cve_id") in ranked_ids]
+        # Re-sort groups by fuzzy score order
+        ranked_order = {doc.get("cve_id"): i for i, doc in enumerate(ranked)}
+        groups.sort(key=lambda g: ranked_order.get(g["lead"].get("cve_id"), 9999))
+        total  = len(groups)
+        groups = groups[skip : skip + page_size]
 
-    # ── Serialise ──────────────────────────────────────────────────────────
-    items: List[dict] = [serialize_doc(doc) for doc in docs]
+    # ── Serialise grouped advisories ──────────────────────────────────────
+    def _serialize_group(grp: dict) -> dict:
+        lead = grp["lead"]
+        # Stringify ObjectId on lead
+        if "_id" in lead:
+            lead["_id"] = str(lead["_id"])
+
+        # Flatten the nested $addToSet sources (produces [[...], [...]] → flat set)
+        flat_sources = sorted({
+            s for sub in (grp.get("sources") or [])
+            for s in (sub if isinstance(sub, list) else [sub])
+            if s
+        })
+
+        return {
+            "advisory_key": grp["_id"],
+            "cves":         grp["cves"],
+            "title":        lead.get("title", ""),
+            "description":  lead.get("description", ""),
+            "metrics":      lead.get("metrics"),
+            "remediation":  lead.get("remediation"),
+            "timeline": {
+                "modified_at":  grp.get("modified_at"),
+                "published_at": grp.get("published_at"),
+            },
+            "metadata": {
+                "sources":        flat_sources,
+                "raw_source_ids": lead.get("metadata", {}).get("raw_source_ids", {}),
+            },
+        }
+
+    items: List[dict] = [_serialize_group(g) for g in groups]
 
     return {
         "data": items,

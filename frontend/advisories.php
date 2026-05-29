@@ -258,7 +258,7 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
       <footer class="page-footer">
         <span>GRID — Global Risk Intelligence Dashboard</span>
         <span>
-          Sortierung: <code>timeline.modified_at</code> ↓ &nbsp;·&nbsp; Gruppiert nach Advisory-ID
+          Sortierung: <code>timeline.modified_at</code> ↓ &nbsp;·&nbsp; Gruppiert nach Advisory-ID (server-seitig)
           &nbsp;·&nbsp; Seite <span id="footerPage">1</span> / <span id="footerPages">…</span>
         </span>
       </footer>
@@ -353,40 +353,20 @@ function esc(s) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   GROUP LOGIC — merge raw API items into advisory groups
+   MAP API GROUPS — transform pre-grouped API response to row format
+   The API now returns advisory groups (grouped by WID/EUVD/CVE-ID
+   server-side), so no client-side grouping is needed.
    ════════════════════════════════════════════════════════════════════ */
-function buildGroupsFromItems(items) {
-    const groups = new Map();
-    for (const adv of items) {
-        const wid  = adv?.metadata?.raw_source_ids?.cert_bund ?? null;
-        const euvd = adv?.metadata?.raw_source_ids?.euvd      ?? null;
-        const key  = wid ?? euvd ?? (adv.cve_id ?? ('adv_' + Math.random()));
-        const mod  = adv?.timeline?.modified_at  ?? '';
-        const pub  = adv?.timeline?.published_at ?? '';
-
-        if (!groups.has(key)) {
-            groups.set(key, {
-                key, title: adv.title ?? '(Kein Titel)',
-                cves: [], lead: adv,
-                modified_at: mod, published_at: pub,
-                sources: new Set(),
-            });
-        }
-        const grp = groups.get(key);
-
-        const cve = adv.cve_id ?? null;
-        if (cve && !grp.cves.includes(cve)) grp.cves.push(cve);
-
-        if (mod && (!grp.modified_at || new Date(mod) > new Date(grp.modified_at))) {
-            grp.modified_at = mod;
-            grp.lead = adv;
-        }
-        if (pub && (!grp.published_at || new Date(pub) < new Date(grp.published_at))) {
-            grp.published_at = pub;
-        }
-        for (const src of (adv?.metadata?.sources ?? [])) grp.sources.add(src);
-    }
-    return [...groups.values()];
+function mapApiGroups(items) {
+    return items.map(item => ({
+        key:          item.advisory_key ?? '',
+        title:        item.title ?? '(Kein Titel)',
+        cves:         item.cves ?? [],
+        lead:         item,  // the item itself carries lead fields (metrics, remediation, etc.)
+        modified_at:  item?.timeline?.modified_at  ?? '',
+        published_at: item?.timeline?.published_at ?? '',
+        sources:      item?.metadata?.sources ?? [],
+    }));
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -399,7 +379,7 @@ function buildRow(grp, rowNum) {
     const cves    = grp.cves;
     const extra   = cves.length - 2;
     const rem     = lead?.remediation?.status ?? '';
-    const sources = [...grp.sources];
+    const sources = grp.sources ?? [];
     const wid     = lead?.metadata?.raw_source_ids?.cert_bund ?? null;
     const euvd    = lead?.metadata?.raw_source_ids?.euvd      ?? null;
     const rowId   = 'row-' + rowNum;
@@ -572,7 +552,7 @@ async function loadPage(page) {
         totalPages = json.pagination?.total_pages ?? 0;
         curPage    = page;
 
-        const groups = buildGroupsFromItems(items);
+        const groups = mapApiGroups(items);
         renderGroups(groups);
         buildPager(totalPages);
         updateStats();
