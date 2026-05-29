@@ -26,27 +26,44 @@ For a deep dive into the system design, please refer to the [Architecture.md](Ar
 ## Tech Stack
 
 - **Backend:** Python 3.11+ (Core libraries: `motor`, `httpx`, `h2`, `asyncio`, `beautifulsoup4`).
+- **API:** FastAPI 2.0+, Pydantic 2.0+, rapidfuzz (fuzzy search), uvicorn.
 - **Database:** MongoDB 7.0+ (NoSQL).
 - **Infrastructure:** Docker for database containerization.
 - **Frontend Interface:** PHP (Public Web Entry Point).
 
 ## Installation
 
-Install all dependencies via `apt` (`asyncio` is part of the Python standard library and needs no installation):
+Install backend dependencies via `apt` (`asyncio` is part of the Python standard library and needs no installation):
 
 ```bash
 sudo apt install python3-httpx python3-h2 python3-bs4 python3-motor python3-uvicorn php
+```
+
+Install API dependencies:
+
+```bash
+pip install -r API/requirements.txt
 ```
 
 ## Project Structure
 
 ```text
 GRID/
+├── API/              # FastAPI REST-API (v2.0)
+│   ├── main.py       # App factory, lifespan, /API/status
+│   ├── database.py   # Motor client, index management
+│   ├── models.py     # Pydantic models
+│   ├── utils.py      # Helpers, TTLCache, sort allow-lists
+│   ├── requirements.txt
+│   └── routers/
+│       ├── advisories.py
+│       ├── products.py
+│       └── vendors.py
 ├── backend/
 │   ├── ingest/       # Raw ingest scripts (cert-bund-raw.py, euvd-raw.py)
 │   ├── mapping.json  # Logic for joining data sources
 │   ├── products.json # Rules for product extraction/normalization
 │   └── vendors.json  # Rules for vendor extraction/normalization
 ├── media/            # Architecture diagrams and assets
-└── frontend/         # Web-facing files
+└── frontend/         # Web-facing files (PHP)
 ```
