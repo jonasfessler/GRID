@@ -112,7 +112,7 @@ async def list_products(
         {"$sort": sort_doc},
         {"$skip": skip},
         {"$limit": page_size},
-        {"$project": {**_LIST_PROJECTION, "_score": 0}},
+        {"$project": {**_LIST_PROJECTION}},
     ]
 
     pipeline.append({

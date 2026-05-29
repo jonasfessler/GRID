@@ -366,7 +366,7 @@ async def list_advisories(
         {"$sort": sort_doc},
         {"$skip": mongo_skip},
         {"$limit": mongo_limit},
-        {"$project": {**_LIST_PROJECTION, "_score": 0}},   # strip internal field
+        {"$project": {**_LIST_PROJECTION}},   # _score excluded implicitly
     ]
 
     pipeline.append({
