@@ -1,9 +1,9 @@
 <?php
 /**
  * GRID — Advisories Feed
- * All data loading happens client-side via async JavaScript fetches.
- * The page renders instantly; 100 advisories appear in the first batch
- * while the browser continues loading more in the background.
+ * Uses server-side pagination: on page-load the total advisory count is fetched
+ * from /API/status. Pages are calculated from that total and the chosen page
+ * size. Each page change fires a single API request for only that page's data.
  *
  * Stylesheet: GRID/frontend/style/advisories.css
  */
@@ -39,58 +39,6 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
 
     <link rel="stylesheet" href="style/advisories.css">
     <style>
-        /* ── Loading progress bar ── */
-        #loadingBar {
-            position: fixed;
-            top: 0; left: 0; right: 0;
-            height: 3px;
-            z-index: 9999;
-            background: var(--border);
-            overflow: hidden;
-        }
-        #loadingBar .bar-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--accent), #5ec9ff, var(--accent));
-            background-size: 200% 100%;
-            animation: barShimmer 1.4s linear infinite;
-            transition: width 0.4s ease;
-            width: 0%;
-        }
-        @keyframes barShimmer {
-            0%   { background-position: 200% 0; }
-            100% { background-position: -200% 0; }
-        }
-        #loadingBar.done {
-            transition: opacity 0.5s 0.3s;
-            opacity: 0;
-        }
-
-        /* ── Loading status badge ── */
-        #loadingStatus {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 11px;
-            color: var(--text-muted);
-            transition: opacity 0.4s;
-        }
-        #loadingStatus .pulse {
-            width: 7px; height: 7px;
-            border-radius: 50%;
-            background: var(--accent);
-            animation: pulse 1s ease-in-out infinite;
-            flex-shrink: 0;
-        }
-        #loadingStatus.done {
-            opacity: 0;
-            pointer-events: none;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50%       { opacity: 0.4; transform: scale(0.7); }
-        }
-
         /* ── Skeleton shimmer rows ── */
         .skeleton-row td {
             padding: 14px;
@@ -109,9 +57,6 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
     </style>
 </head>
 <body>
-
-<!-- Top loading bar -->
-<div id="loadingBar"><div class="bar-fill" id="barFill"></div></div>
 
 <div class="app" id="app">
 
@@ -235,30 +180,23 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
     <!-- PAGE BODY -->
     <div class="page-body">
 
-      <!-- ── Section header ── -->
       <div class="section-header" style="flex-wrap:wrap;gap:.6rem 1.5rem;align-items:center;">
         <h1 class="section-title" style="margin:0;">Security Advisories</h1>
         <div style="display:flex;flex-direction:column;gap:.35rem;margin-left:auto;align-items:flex-end;">
           <span class="section-meta">
-            <span id="loadedCount">0</span> geladen
+            <span id="pageInfoMeta">…</span>
             &nbsp;·&nbsp;
             <span id="totalCountMeta">…</span> gesamt
             &nbsp;·&nbsp;
             Generiert: <span data-fmt-datetime="<?= htmlspecialchars($generated_at_iso) ?>">…</span>
           </span>
           <div style="display:flex;align-items:center;gap:.5rem;font-size:12px;color:var(--text-muted);">
-            <div id="loadingStatus">
-              <span class="pulse"></span>
-              <span id="loadingText">Lade Advisories…</span>
-            </div>
-            <span style="opacity:.3;">|</span>
             <label for="pageSizeSelect" style="white-space:nowrap;">Pro Seite:</label>
             <select id="pageSizeSelect" style="background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;padding:.25rem .5rem;font-size:12px;cursor:pointer;">
               <option value="10">10</option>
               <option value="25">25</option>
               <option value="50">50</option>
               <option value="100" selected>100</option>
-              <option value="200">200</option>
             </select>
           </div>
         </div>
@@ -312,6 +250,7 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
             </tbody>
           </table>
         </div>
+        </div>
       </div>
 
       <div id="pagination" style="display:flex;align-items:center;justify-content:center;gap:.35rem;padding:1.25rem 2rem .5rem;flex-wrap:wrap;"></div>
@@ -320,7 +259,7 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
         <span>GRID — Global Risk Intelligence Dashboard</span>
         <span>
           Sortierung: <code>timeline.modified_at</code> ↓ &nbsp;·&nbsp; Gruppiert nach Advisory-ID
-          &nbsp;·&nbsp; <span id="footerLoaded">0</span> geladen
+          &nbsp;·&nbsp; Seite <span id="footerPage">1</span> / <span id="footerPages">…</span>
         </span>
       </footer>
 
@@ -330,39 +269,32 @@ $generated_at_iso = (new DateTime('now', new DateTimeZone('UTC')))->format('c');
 
 <script>
 /* ════════════════════════════════════════════════════════════════════
-   GRID — Advisories: Async Progressive Loader
+   GRID — Advisories: Server-Side Pagination
    ════════════════════════════════════════════════════════════════════ */
 
-const PROXY         = 'api-proxy.php';  // same-origin PHP proxy → localhost:8000
-const API_PAGE_SIZE = 200;   // raw items per API request (max allowed)
-const SORT_BY       = '-timeline.modified_at';
+const PROXY   = 'api-proxy.php';   // same-origin PHP proxy → localhost:8000
+const SORT_BY = '-timeline.modified_at';
 
 /* ── State ── */
-const groups     = new Map();   // key → group object
-let   allRows    = [];          // rendered <tr> elements in order
-let   curPage    = 1;
-let   pageSize   = 100;
-let   apiPage    = 1;
-let   apiTotal   = 0;
-let   loading    = false;
-let   done       = false;
-let   rowCursor  = 0;           // next sequential row number
+let curPage    = 1;
+let pageSize   = 100;
+let totalRows  = 0;   // total advisories matching current search (from API)
+let totalPages = 0;
+let loading    = false;
+let searchTimer = null;  // debounce timer for search input
 
 /* ── DOM refs ── */
-const tbody        = document.getElementById('advisoryTableBody');
-const pagerEl      = document.getElementById('pagination');
-const pageSel      = document.getElementById('pageSizeSelect');
-const searchEl     = document.getElementById('searchInput');
-const loadedEl     = document.getElementById('loadedCount');
-const totalMeta    = document.getElementById('totalCountMeta');
-const footerLoaded = document.getElementById('footerLoaded');
-const navCount     = document.getElementById('navTotalCount');
-const loadStatus   = document.getElementById('loadingStatus');
-const loadText     = document.getElementById('loadingText');
-const barFill      = document.getElementById('barFill');
-const loadingBar   = document.getElementById('loadingBar');
-const errorBanner  = document.getElementById('errorBanner');
-const skeleton     = document.getElementById('skeletonRows');
+const tbody       = document.getElementById('advisoryTableBody');
+const pagerEl     = document.getElementById('pagination');
+const pageSel     = document.getElementById('pageSizeSelect');
+const searchEl    = document.getElementById('searchInput');
+const pageInfoEl  = document.getElementById('pageInfoMeta');
+const totalMeta   = document.getElementById('totalCountMeta');
+const navCount    = document.getElementById('navTotalCount');
+const footerPage  = document.getElementById('footerPage');
+const footerPages = document.getElementById('footerPages');
+const errorBanner = document.getElementById('errorBanner');
+const skeleton    = document.getElementById('skeletonRows');
 
 /* ════════════════════════════════════════════════════════════════════
    HELPERS
@@ -421,9 +353,10 @@ function esc(s) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   GROUP LOGIC (mirrors PHP dedup logic)
+   GROUP LOGIC — merge raw API items into advisory groups
    ════════════════════════════════════════════════════════════════════ */
-function mergeIntoGroups(items) {
+function buildGroupsFromItems(items) {
+    const groups = new Map();
     for (const adv of items) {
         const wid  = adv?.metadata?.raw_source_ids?.cert_bund ?? null;
         const euvd = adv?.metadata?.raw_source_ids?.euvd      ?? null;
@@ -437,27 +370,23 @@ function mergeIntoGroups(items) {
                 cves: [], lead: adv,
                 modified_at: mod, published_at: pub,
                 sources: new Set(),
-                rendered: false,
             });
         }
         const grp = groups.get(key);
 
-        // CVE dedup
         const cve = adv.cve_id ?? null;
         if (cve && !grp.cves.includes(cve)) grp.cves.push(cve);
 
-        // Newest modified_at wins as lead
         if (mod && (!grp.modified_at || new Date(mod) > new Date(grp.modified_at))) {
             grp.modified_at = mod;
             grp.lead = adv;
         }
-        // Earliest published_at
         if (pub && (!grp.published_at || new Date(pub) < new Date(grp.published_at))) {
             grp.published_at = pub;
         }
-        // Sources
         for (const src of (adv?.metadata?.sources ?? [])) grp.sources.add(src);
     }
+    return [...groups.values()];
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -475,28 +404,22 @@ function buildRow(grp, rowNum) {
     const euvd    = lead?.metadata?.raw_source_ids?.euvd      ?? null;
     const rowId   = 'row-' + rowNum;
 
-    /* advisory-id cell */
     let idCell = '';
     if (wid)       idCell = `<span class="adv-id-label">WID</span><span class="adv-id">${esc(wid)}</span>`;
     else if (euvd) idCell = `<span class="adv-id-label">EUVD</span><span class="adv-id">${esc(euvd)}</span>`;
     else           idCell = `<span class="adv-id-label">CVE</span><span class="adv-id">${esc(cves[0] ?? '—')}</span>`;
 
-    /* CVE tags */
     let cveTags = cves.slice(0, 2).map(c => `<span class="cve-tag">${esc(c)}</span>`).join('');
     if (extra > 0) {
         const hidden = cves.slice(2).map(c => `<span class="cve-tag cve-hidden" data-row="${rowId}">${esc(c)}</span>`).join('');
         cveTags += hidden + `<span class="cve-more" id="btn-${rowId}" onclick="toggleCves('${rowId}')">+${extra} weitere</span>`;
     }
 
-    /* source badges */
     const srcBadges = sources.map(s => `<span class="src-badge src-${esc(s)}">${esc(s)}</span>`).join('');
-
-    /* remediation */
     const remHtml = rem
         ? `<span class="rem-badge ${remClass(rem)}">${esc(rem)}</span>`
         : `<span style="color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace;">—</span>`;
 
-    /* description */
     const desc = lead.description ? `<div class="adv-desc">${esc(lead.description)}</div>` : '';
     const pub  = grp.published_at ? `<div class="adv-published">Veröffentlicht: <span data-fmt-date="${esc(grp.published_at)}">…</span></div>` : '';
 
@@ -523,7 +446,6 @@ function buildRow(grp, rowNum) {
       <td>${remHtml}</td>
     `;
 
-    /* format date elements in this row */
     tr.querySelectorAll('[data-fmt-date]').forEach(el => el.textContent = fmtDate(el.dataset.fmtDate));
     tr.querySelectorAll('[data-fmt-ago]').forEach(el  => el.textContent = ago(el.dataset.fmtAgo));
 
@@ -531,86 +453,42 @@ function buildRow(grp, rowNum) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   RENDER NEW GROUPS (append unrendered groups sorted by modified_at)
+   RENDER PAGE — clear table and render the groups for this page
    ════════════════════════════════════════════════════════════════════ */
-function renderNewGroups() {
-    /* Remove skeleton placeholder on first real render */
+function renderGroups(groups) {
     if (skeleton && skeleton.parentNode) skeleton.remove();
-
-    /* Collect only groups that haven't been rendered yet */
-    /* API returns sorted desc by modified_at, so new pages always have OLDER items
-       → we can safely append them to the bottom of the existing table. */
-    const unrendered = [...groups.values()]
-        .filter(g => !g.rendered)
-        .sort((a, b) => new Date(b.modified_at || '1970') - new Date(a.modified_at || '1970'));
-
-    if (unrendered.length > 0) {
-        const frag = document.createDocumentFragment();
-        for (const grp of unrendered) {
-            grp.rendered = true;
-            rowCursor++;
-            const tr = buildRow(grp, rowCursor);
-            grp._tr  = tr;
-            frag.appendChild(tr);
-            allRows.push(tr);
-        }
-        tbody.appendChild(frag);  // append — never clear
-    }
-
-    updateStats();
-    applyPagination();
+    tbody.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    const offset = (curPage - 1) * pageSize;
+    groups.forEach((grp, i) => {
+        frag.appendChild(buildRow(grp, offset + i + 1));
+    });
+    tbody.appendChild(frag);
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   STATS & PROGRESS
+   STATS UPDATE
    ════════════════════════════════════════════════════════════════════ */
 function updateStats() {
-    const n = groups.size;
-    loadedEl.textContent   = n.toLocaleString();
-    footerLoaded.textContent = n.toLocaleString();
-    if (apiTotal > 0) {
-        totalMeta.textContent = apiTotal.toLocaleString();
-        navCount.textContent  = apiTotal.toLocaleString();
-        /* progress bar based on raw API pages fetched */
-        const pct = Math.min(100, Math.round(((apiPage - 1) * API_PAGE_SIZE / apiTotal) * 100));
-        barFill.style.width = pct + '%';
-    }
-    loadText.textContent = done
-        ? `${n.toLocaleString()} Advisories geladen`
-        : `${n.toLocaleString()} geladen, lade mehr…`;
-}
+    const start    = totalRows === 0 ? 0 : (curPage - 1) * pageSize + 1;
+    const end      = Math.min(curPage * pageSize, totalRows);
+    const pagesStr = totalPages.toLocaleString();
 
-function markDone() {
-    done = true;
-    loadStatus.classList.add('done');
-    loadingBar.classList.add('done');
-    barFill.style.width = '100%';
-    updateStats();
+    pageInfoEl.textContent  = totalRows > 0 ? `${start.toLocaleString()}–${end.toLocaleString()}` : '0–0';
+    totalMeta.textContent   = totalRows.toLocaleString();
+    navCount.textContent    = totalRows.toLocaleString();
+    if (footerPage)  footerPage.textContent  = curPage.toLocaleString();
+    if (footerPages) footerPages.textContent = pagesStr;
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   PAGINATION ENGINE
+   PAGINATION ENGINE (UI — page buttons trigger API fetch)
    ════════════════════════════════════════════════════════════════════ */
 const btnStyle = 'padding:.3rem .7rem;border-radius:6px;border:1px solid var(--border,rgba(255,255,255,.12));' +
     'background:var(--bg-card,#151e2d);color:var(--text-primary,#e1e1e1);cursor:pointer;font-size:13px;' +
     'transition:background .15s,border-color .15s;min-width:2.2rem;text-align:center;';
 
-function filtered() {
-    const q = (searchEl?.value || '').toLowerCase().trim();
-    return q ? allRows.filter(r => r.textContent.toLowerCase().includes(q)) : allRows;
-}
-
-function applyPagination() {
-    const rows  = filtered();
-    const pages = Math.max(1, Math.ceil(rows.length / pageSize));
-    curPage = Math.min(curPage, pages);
-    const s = (curPage - 1) * pageSize;
-    allRows.forEach(r => r.style.display = 'none');
-    rows.slice(s, s + pageSize).forEach(r => r.style.display = '');
-    buildPager(rows.length, pages, s);
-}
-
-function buildPager(total, pages, s) {
+function buildPager(pages) {
     pagerEl.innerHTML = '';
     if (pages <= 1) return;
 
@@ -620,7 +498,7 @@ function buildPager(total, pages, s) {
         b.style.cssText = btnStyle;
         if (active)   { b.style.background = 'var(--accent,#1a8fd1)'; b.style.borderColor = 'var(--accent,#1a8fd1)'; b.style.color = '#fff'; }
         if (disabled) { b.style.opacity = '.35'; b.style.cursor = 'not-allowed'; }
-        else b.addEventListener('click', () => { curPage = page; applyPagination(); pagerEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+        else b.addEventListener('click', () => { goToPage(page); pagerEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
         pagerEl.appendChild(b);
     };
     const dot = () => {
@@ -639,65 +517,83 @@ function buildPager(total, pages, s) {
     if (pages > 1)     mk(pages, pages, curPage === pages, false);
     mk('→', curPage + 1, false, curPage === pages);
 
-    const info = document.createElement('span');
+    const start = (curPage - 1) * pageSize + 1;
+    const end   = Math.min(curPage * pageSize, totalRows);
+    const info  = document.createElement('span');
     info.style.cssText = 'color:var(--text-muted,rgba(255,255,255,.38));font-size:12px;margin-left:.5rem;white-space:nowrap;';
-    info.textContent = (s + 1) + '–' + Math.min(s + pageSize, total) + ' / ' + total;
+    info.textContent = `${start.toLocaleString()}–${end.toLocaleString()} / ${totalRows.toLocaleString()}`;
     pagerEl.appendChild(info);
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   ASYNC LOADER
+   CORE FETCH — load a single page from the API
    ════════════════════════════════════════════════════════════════════ */
-async function loadBatch() {
-    if (loading || done) return;
+async function loadPage(page) {
+    if (loading) return;
     loading = true;
+    errorBanner.style.display = 'none';
+
+    /* Show skeleton while fetching */
+    tbody.innerHTML = `
+      <tr class="skeleton-row">
+        <td><div class="skeleton-cell" style="width:20px;margin:auto;"></div></td>
+        <td><div class="skeleton-cell" style="width:140px;"></div></td>
+        <td>
+          <div class="skeleton-cell" style="width:85%;margin-bottom:6px;"></div>
+          <div class="skeleton-cell" style="width:60%;height:10px;"></div>
+        </td>
+        <td><div class="skeleton-cell" style="width:100px;"></div></td>
+        <td><div class="skeleton-cell" style="width:50px;margin:auto;"></div></td>
+        <td><div class="skeleton-cell" style="width:45px;"></div></td>
+        <td>
+          <div class="skeleton-cell" style="width:80px;margin-bottom:4px;"></div>
+          <div class="skeleton-cell" style="width:55px;height:10px;"></div>
+        </td>
+        <td><div class="skeleton-cell" style="width:90px;"></div></td>
+      </tr>`;
 
     try {
+        const q = (searchEl?.value || '').trim();
         const params = new URLSearchParams({
             path:      '/API/advisories/',
-            page_size: API_PAGE_SIZE,
-            page:      apiPage,
+            page_size: pageSize,
+            page:      page,
             sort_by:   SORT_BY,
         });
+        if (q) params.set('search', q);
+
         const resp = await fetch(`${PROXY}?${params}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const json = await resp.json();
         if (json.error) throw new Error(json.error);
 
         const items = json.data ?? [];
-        apiTotal = json.pagination?.total ?? apiTotal;
-        const hasNext = json.pagination?.has_next ?? false;
+        totalRows  = json.pagination?.total      ?? 0;
+        totalPages = json.pagination?.total_pages ?? 0;
+        curPage    = page;
 
-        mergeIntoGroups(items);
-
-        const isFirstBatch = apiPage === 1;
-        apiPage++;
-
-        /* Always render new rows so the counter & table stay live */
-        renderNewGroups();
-
-        loading = false;
-
-        if (!hasNext || items.length === 0) {
-            /* Final render pass to catch any remaining groups */
-            renderNewGroups();
-            markDone();
-            return;
-        }
-
-        /* Continue loading in the background with a tiny yield so UI stays responsive */
-        setTimeout(loadBatch, 0);
+        const groups = buildGroupsFromItems(items);
+        renderGroups(groups);
+        buildPager(totalPages);
+        updateStats();
 
     } catch (err) {
-        loading = false;
         console.error('Advisory fetch error:', err);
-        if (groups.size === 0) {
-            errorBanner.style.display = '';
-            errorBanner.innerHTML = `<strong>⚠ API-Fehler:</strong> ${esc(err.message)} — Stelle sicher, dass der GRID-Server auf dem Host unter Port 8000 läuft.`;
-            if (skeleton && skeleton.parentNode) skeleton.remove();
-        }
-        markDone();
+        tbody.innerHTML = '';
+        errorBanner.style.display = '';
+        errorBanner.innerHTML = `<strong>⚠ API-Fehler:</strong> ${esc(err.message)} — Stelle sicher, dass der GRID-Server auf dem Host unter Port 8000 läuft.`;
+    } finally {
+        loading = false;
     }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NAVIGATE TO PAGE
+   ════════════════════════════════════════════════════════════════════ */
+function goToPage(page) {
+    page = Math.max(1, Math.min(page, totalPages || 1));
+    loadPage(page);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -734,14 +630,28 @@ function toggleCves(rowId) {
     moreBtn.textContent = isOpen ? '+' + hidden.length + ' weitere' : 'Weniger ▲';
 }
 
-/* ── Pagination controls ── */
-pageSel.addEventListener('change', () => { pageSize = +pageSel.value; curPage = 1; applyPagination(); });
-if (searchEl) searchEl.addEventListener('input', () => { curPage = 1; applyPagination(); });
+/* ── Page-size selector: reset to page 1 and reload ── */
+pageSel.addEventListener('change', () => {
+    pageSize = +pageSel.value;
+    curPage  = 1;
+    loadPage(1);
+});
+
+/* ── Search: debounce 350 ms, then reload from page 1 ── */
+if (searchEl) {
+    searchEl.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+            curPage = 1;
+            loadPage(1);
+        }, 350);
+    });
+}
 
 /* ════════════════════════════════════════════════════════════════════
-   BOOT
+   BOOT — load page 1 immediately
    ════════════════════════════════════════════════════════════════════ */
-loadBatch();
+loadPage(1);
 </script>
 
 </body>

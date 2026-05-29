@@ -33,6 +33,7 @@ def _build_filter(
     source: Optional[str],
     os_filter: Optional[str],
     remediation_status: Optional[str],
+    search: Optional[str] = None,
 ) -> dict:
     flt: dict = {}
 
@@ -68,6 +69,15 @@ def _build_filter(
     # Remediation status (case-insensitive exact prefix)
     if remediation_status:
         flt["remediation.status"] = {"$regex": remediation_status, "$options": "i"}
+
+    # Full-text search across title, description, and CVE ID
+    if search:
+        pattern = {"$regex": search, "$options": "i"}
+        flt["$or"] = [
+            {"title":       pattern},
+            {"description": pattern},
+            {"cve_id":      pattern},
+        ]
 
     return flt
 
@@ -108,13 +118,18 @@ async def list_advisories(
         None,
         description="Filter by remediation status string, e.g. 'Patch available'.",
     ),
+    # Full-text search
+    search: Optional[str] = Query(
+        None,
+        description="Case-insensitive substring search across title, description, and CVE ID.",
+    ),
     # Sorting
     sort_by: str = Query(
         "timeline.published_at",
         description="Field to sort by. Prefix with '-' for descending, e.g. '-metrics.cvss_v3.base_score'.",
     ),
 ) -> dict:
-    flt = _build_filter(min_cvss, max_cvss, vendor_name, product_name, source, affected_os, remediation_status)
+    flt = _build_filter(min_cvss, max_cvss, vendor_name, product_name, source, affected_os, remediation_status, search)
 
     # --- sorting ---
     descending = sort_by.startswith("-")
@@ -124,9 +139,9 @@ async def list_advisories(
     skip   = (page - 1) * page_size
     col    = col_advisories()
     total  = await col.count_documents(flt)
-    cursor = col.find(flt, {"_id": 1, "cve_id": 1, "title": 1, "metrics": 1,
-                            "timeline": 1, "remediation": 1, "metadata": 1,
-                            "infrastructure.affected_os": 1})
+    cursor = col.find(flt, {"_id": 1, "cve_id": 1, "title": 1, "description": 1,
+                            "metrics": 1, "timeline": 1, "remediation": 1,
+                            "metadata": 1, "infrastructure.affected_os": 1})
     cursor = cursor.sort(sort_field, sort_dir).skip(skip).limit(page_size)
 
     items: List[dict] = []
