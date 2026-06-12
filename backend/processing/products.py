@@ -47,18 +47,28 @@ Fault Tolerance
   - Transient DB errors trigger configurable retries with delay.
   - Missing vendor references are created inline (upsert) with a warning.
   - The watermark is only advanced after all documents in the batch succeed.
+
+Performance
+-----------
+  - Both collections (cert-bund, euvd) are processed concurrently.
+  - Product entries within a document are upserted concurrently via asyncio
+    semaphore-bounded gather (CONCURRENCY workers at a time).
+  - Vendors are cached in-memory to avoid repeated DB lookups.
+  - Bulk writes (UpdateOne ops) are flushed in UPSERT_BUFFER_SIZE batches.
 """
 
 import asyncio
 import json
 import logging
 import re
+import time
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
 from pymongo.errors import PyMongoError
 
 # ---------------------------------------------------------------------------
@@ -79,10 +89,12 @@ COLL_VENDORS   = "vendors"
 COLL_PRODUCTS  = "products"
 COLL_META      = "metadata"
 
-PROCESSOR_STATE_ID = "product_processor"
-BATCH_SIZE         = 200
-MAX_DB_RETRIES     = 3
-RETRY_DELAY        = 2.0
+PROCESSOR_STATE_ID  = "product_processor"
+BATCH_SIZE          = 500           # cursor batch size (was 200)
+UPSERT_BUFFER_SIZE  = 500           # bulk-write flush threshold
+CONCURRENCY         = 20            # max concurrent entry-processing tasks
+MAX_DB_RETRIES      = 3
+RETRY_DELAY         = 2.0
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -318,46 +330,6 @@ async def save_watermark(db_gridd, watermark: datetime) -> None:
     logger.info(f"Watermark advanced to {watermark.isoformat()}")
 
 
-async def get_or_create_vendor(
-    db_gridd,
-    raw_vendor: str,
-    normalized_vendor: str,
-    source: str,
-) -> ObjectId | None:
-    """
-    Looks up a vendor in GRIDd/vendors by normalized name.
-    Creates it inline (with a warning) if it doesn't exist yet.
-    Returns the vendor's _id, or None on error.
-    """
-    if not normalized_vendor:
-        return None
-
-    now = datetime.now(UTC)
-
-    result = await _retry(lambda: db_gridd[COLL_VENDORS].find_one_and_update(
-        {"name": normalized_vendor},
-        {
-            "$set":         {"name": normalized_vendor, "updated_at": now},
-            "$setOnInsert": {"created_at": now},
-            "$addToSet":    {"raw_names": raw_vendor, "sources": source},
-        },
-        upsert=True,
-        return_document=True,
-    ))
-
-    if not result:
-        logger.warning(f"  [WARN] Could not get/create vendor '{normalized_vendor}'")
-        return None
-
-    if result.get("created_at") == now:
-        logger.warning(
-            f"  [WARN] Vendor '{normalized_vendor}' not found in GRIDd/vendors — "
-            f"created inline. Run vendors.py first to avoid this."
-        )
-
-    return result["_id"]
-
-
 async def ensure_indexes(db_gridd) -> None:
     """Creates indexes on GRIDd/products (idempotent)."""
     await db_gridd[COLL_PRODUCTS].create_index(
@@ -367,48 +339,116 @@ async def ensure_indexes(db_gridd) -> None:
     logger.info("Indexes on GRIDd/products verified.")
 
 # ---------------------------------------------------------------------------
-# Upsert
+# Vendor Cache
 # ---------------------------------------------------------------------------
 
-async def upsert_product(
-    db_gridd,
-    raw_product:       str,
-    normalized_product: str,
-    vendor_id:         ObjectId | None,
-    normalized_vendor: str,
-    versions:          list[dict],
-    source:            str,
-) -> None:
+class VendorCache:
     """
-    Upserts a product into GRIDd/products by (vendor_name, name).
-    Accumulates raw_names, versions (by version_string), and sources.
+    In-memory cache for vendor lookups/creation within a single run.
+    Avoids repeated DB round-trips for the same normalized vendor name.
+    Thread-safe via asyncio.Lock per vendor name.
     """
-    now = datetime.now(UTC)
 
-    # Merge versions: add new version strings, don't duplicate existing ones
-    version_updates = [
-        {"$addToSet": {"versions": ver}}
-        for ver in versions
-    ]
+    def __init__(self) -> None:
+        self._cache: dict[str, ObjectId | None] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._global_lock = asyncio.Lock()
 
-    await _retry(lambda: db_gridd[COLL_PRODUCTS].update_one(
-        {"vendor_name": normalized_vendor, "name": normalized_product},
-        {
-            "$set":         {
-                "name":        normalized_product,
-                "vendor_name": normalized_vendor,
-                "vendor_id":   vendor_id,
-                "updated_at":  now,
-            },
-            "$setOnInsert": {"created_at": now},
-            "$addToSet":    {
-                "raw_names": raw_product,
-                "sources":   source,
-                "versions":  {"$each": versions},
-            },
-        },
-        upsert=True,
-    ))
+    async def get_or_create(
+        self,
+        db_gridd,
+        raw_vendor: str,
+        normalized_vendor: str,
+        source: str,
+    ) -> ObjectId | None:
+        """Returns vendor _id (from cache or DB upsert). None on error."""
+        if not normalized_vendor:
+            return None
+
+        # Fast path — already cached
+        if normalized_vendor in self._cache:
+            return self._cache[normalized_vendor]
+
+        # Get or create a per-vendor lock
+        async with self._global_lock:
+            if normalized_vendor not in self._locks:
+                self._locks[normalized_vendor] = asyncio.Lock()
+            lock = self._locks[normalized_vendor]
+
+        async with lock:
+            # Double-check after acquiring the lock
+            if normalized_vendor in self._cache:
+                return self._cache[normalized_vendor]
+
+            now = datetime.now(UTC)
+            result = await _retry(lambda: db_gridd[COLL_VENDORS].find_one_and_update(
+                {"name": normalized_vendor},
+                {
+                    "$set":         {"name": normalized_vendor, "updated_at": now},
+                    "$setOnInsert": {"created_at": now},
+                    "$addToSet":    {"raw_names": raw_vendor, "sources": source},
+                },
+                upsert=True,
+                return_document=True,
+            ))
+
+            if not result:
+                logger.warning(f"  [WARN] Could not get/create vendor '{normalized_vendor}'")
+                self._cache[normalized_vendor] = None
+                return None
+
+            if result.get("created_at") == now:
+                logger.warning(
+                    f"  [WARN] Vendor '{normalized_vendor}' not found in GRIDd/vendors — "
+                    f"created inline. Run vendors.py first to avoid this."
+                )
+
+            self._cache[normalized_vendor] = result["_id"]
+            return result["_id"]
+
+# ---------------------------------------------------------------------------
+# Bulk Upsert Buffer
+# ---------------------------------------------------------------------------
+
+class BulkUpsertBuffer:
+    """
+    Accumulates UpdateOne operations and flushes them as bulk_write batches.
+    Much faster than individual update_one calls for high-volume upserts.
+    """
+
+    def __init__(self, collection, buffer_size: int = UPSERT_BUFFER_SIZE) -> None:
+        self._collection = collection
+        self._buffer_size = buffer_size
+        self._ops: list[UpdateOne] = []
+        self._flushed = 0
+
+    def add(self, op: UpdateOne) -> None:
+        self._ops.append(op)
+
+    @property
+    def pending(self) -> int:
+        return len(self._ops)
+
+    @property
+    def total_flushed(self) -> int:
+        return self._flushed
+
+    async def maybe_flush(self) -> int:
+        """Flushes if buffer is at or above threshold. Returns ops flushed."""
+        if len(self._ops) >= self._buffer_size:
+            return await self.flush()
+        return 0
+
+    async def flush(self) -> int:
+        """Flushes all pending operations. Returns number flushed."""
+        if not self._ops:
+            return 0
+        ops = self._ops
+        self._ops = []
+        count = len(ops)
+        await _retry(lambda: self._collection.bulk_write(ops, ordered=False))
+        self._flushed += count
+        return count
 
 # ---------------------------------------------------------------------------
 # Batch Processor
@@ -423,22 +463,41 @@ async def process_collection(
     products_cfg: dict,
     vendors_cfg:  dict,
     watermark:    datetime,
+    vendor_cache: VendorCache,
 ) -> tuple[int, int, datetime | None]:
     """
     Queries a GRIDr collection for documents newer than watermark,
     extracts products from each, and upserts them into GRIDd/products.
 
+    Product entries within each document are processed concurrently
+    (bounded by CONCURRENCY semaphore) and written via bulk_write.
+
     Returns (docs_processed, products_upserted, max_mirrored_at).
     """
+    # Count total documents for progress reporting
+    total_count = await db_gridr[collection].count_documents(
+        {"mirrored_at": {"$gt": watermark}}
+    )
+    logger.info(f"[{source.upper()}] Found {total_count} documents to process.")
+
+    if total_count == 0:
+        return 0, 0, None
+
     query  = {"mirrored_at": {"$gt": watermark}}
     cursor = db_gridr[collection].find(
         query,
-        {"mirrored_at": 1, "product_tree": 1, "enisaIdVendor": 1, "enisaIdProduct": 1},
+        {"mirrored_at": 1, "product_tree": 1, "enisaIdVendor": 1, "enisaIdProduct": 1,
+         "document": 1},
     ).batch_size(BATCH_SIZE)
 
     docs_processed    = 0
     products_upserted = 0
     max_mirrored_at: datetime | None = None
+
+    semaphore = asyncio.Semaphore(CONCURRENCY)
+    bulk = BulkUpsertBuffer(db_gridd[COLL_PRODUCTS])
+
+    t_start = time.perf_counter()
 
     async for doc in cursor:
         try:
@@ -450,40 +509,112 @@ async def process_collection(
 
             product_entries = extract_fn(doc)
 
-            for entry in product_entries:
-                raw_vendor  = entry["raw_vendor"]
-                raw_product = entry["raw_product"]
-                versions    = entry["versions"]
+            # Identify this document for logging
+            doc_id = (
+                doc.get("document", {}).get("tracking", {}).get("id")
+                or doc.get("id")
+                or str(doc.get("_id", "?"))
+            )
 
-                norm_vendor  = normalize_vendor_name(raw_vendor, vendors_cfg)
-                norm_product = normalize_product_name(raw_product, norm_vendor, products_cfg)
-
-                if not norm_product:
-                    continue
-
-                vendor_id = await get_or_create_vendor(
-                    db_gridd, raw_vendor, norm_vendor, source
+            if not product_entries:
+                docs_processed += 1
+                logger.info(
+                    f"  [{source.upper()}] [{docs_processed}/{total_count}] "
+                    f"{doc_id} — 0 products (skipped)"
                 )
+                continue
 
-                await upsert_product(
-                    db_gridd,
-                    raw_product=raw_product,
-                    normalized_product=norm_product,
-                    vendor_id=vendor_id,
-                    normalized_vendor=norm_vendor,
-                    versions=versions,
-                    source=source,
-                )
-                products_upserted += 1
-                logger.debug(
-                    f"  [PRODUCT] {raw_product!r} → {norm_product!r} "
-                    f"(vendor: {norm_vendor!r}, {source})"
-                )
+            # --- Process all entries concurrently with semaphore bound ---
+            async def process_entry(entry: dict) -> UpdateOne | None:
+                async with semaphore:
+                    raw_vendor  = entry["raw_vendor"]
+                    raw_product = entry["raw_product"]
+                    versions    = entry["versions"]
 
-            docs_processed += 1
+                    norm_vendor  = normalize_vendor_name(raw_vendor, vendors_cfg)
+                    norm_product = normalize_product_name(raw_product, norm_vendor, products_cfg)
+
+                    if not norm_product:
+                        return None
+
+                    vendor_id = await vendor_cache.get_or_create(
+                        db_gridd, raw_vendor, norm_vendor, source
+                    )
+
+                    now = datetime.now(UTC)
+                    op = UpdateOne(
+                        {"vendor_name": norm_vendor, "name": norm_product},
+                        {
+                            "$set":         {
+                                "name":        norm_product,
+                                "vendor_name": norm_vendor,
+                                "vendor_id":   vendor_id,
+                                "updated_at":  now,
+                            },
+                            "$setOnInsert": {"created_at": now},
+                            "$addToSet":    {
+                                "raw_names": raw_product,
+                                "sources":   source,
+                                "versions":  {"$each": versions},
+                            },
+                        },
+                        upsert=True,
+                    )
+
+                    logger.debug(
+                        f"    [PRODUCT] {raw_product!r} → {norm_product!r} "
+                        f"(vendor: {norm_vendor!r}, {source})"
+                    )
+                    return op
+
+            # Gather all entry tasks concurrently
+            results = await asyncio.gather(
+                *(process_entry(e) for e in product_entries),
+                return_exceptions=True,
+            )
+
+            entry_count = 0
+            entry_errors = 0
+            for r in results:
+                if isinstance(r, Exception):
+                    entry_errors += 1
+                    logger.error(f"    [ERROR] Entry processing failed: {r}")
+                elif r is not None:
+                    bulk.add(r)
+                    entry_count += 1
+
+            # Flush if buffer is full
+            flushed = await bulk.maybe_flush()
+            if flushed:
+                logger.info(f"    [BULK FLUSH] Wrote {flushed} product upserts to DB")
+
+            products_upserted += entry_count
+            docs_processed    += 1
+
+            # Per-document progress log (like join.py)
+            elapsed = time.perf_counter() - t_start
+            rate    = docs_processed / elapsed if elapsed > 0 else 0
+            error_note = f", {entry_errors} errors" if entry_errors else ""
+            logger.info(
+                f"  [{source.upper()}] [{docs_processed}/{total_count}] "
+                f"{doc_id} — {entry_count} products{error_note} "
+                f"({rate:.1f} docs/s)"
+            )
 
         except Exception as exc:
             logger.error(f"  [ERROR] Failed to process doc {doc.get('_id')}: {exc}")
+
+    # Final flush of remaining buffered ops
+    remaining = await bulk.flush()
+    if remaining:
+        logger.info(f"  [{source.upper()}] [BULK FLUSH] Final write: {remaining} product upserts")
+
+    elapsed = time.perf_counter() - t_start
+    logger.info(
+        f"  [{source.upper()}] Done: {docs_processed} docs, "
+        f"{products_upserted} products in {elapsed:.1f}s "
+        f"(buffer flushed {bulk.total_flushed} total ops)"
+    )
 
     return docs_processed, products_upserted, max_mirrored_at
 
@@ -500,9 +631,8 @@ async def run() -> None:
     1. Load products.json and vendors.json configs.
     2. Connect to GRIDr and GRIDd.
     3. Load the current watermark from GRIDd/metadata.
-    4. Process cert-bund collection (CSAF branch hierarchy extraction).
-    5. Process euvd collection (EUVD enisaIdProduct extraction).
-    6. Advance watermark to highest mirrored_at value in this batch.
+    4. Process cert-bund and euvd collections concurrently.
+    5. Advance watermark to highest mirrored_at value in this batch.
     """
     products_cfg, vendors_cfg = load_configs()
 
@@ -518,53 +648,65 @@ async def run() -> None:
         logger.info(f"PRODUCT PROCESSOR STARTED — watermark: {watermark.isoformat()}")
         logger.info("=" * 60)
 
-        total_docs     = 0
-        total_products = 0
-        new_watermark: datetime | None = None
+        # Shared vendor cache across both collections
+        vendor_cache = VendorCache()
 
-        # --- CSAF (cert-bund) ---
-        docs, products, wm = await process_collection(
-            db_gridr, db_gridd,
-            collection=COLL_CERT_BUND,
-            source="csaf",
-            extract_fn=extract_products_from_csaf,
-            products_cfg=products_cfg,
-            vendors_cfg=vendors_cfg,
-            watermark=watermark,
-        )
-        logger.info(f"  cert-bund: {docs} docs processed, {products} product entries upserted.")
-        total_docs     += docs
-        total_products += products
-        if wm and (new_watermark is None or wm > new_watermark):
-            new_watermark = wm
+        t_start = time.perf_counter()
 
-        # --- EUVD ---
-        docs, products, wm = await process_collection(
-            db_gridr, db_gridd,
-            collection=COLL_EUVD,
-            source="euvd",
-            extract_fn=extract_products_from_euvd,
-            products_cfg=products_cfg,
-            vendors_cfg=vendors_cfg,
-            watermark=watermark,
+        # --- Process both collections concurrently ---
+        csaf_task = asyncio.create_task(
+            process_collection(
+                db_gridr, db_gridd,
+                collection=COLL_CERT_BUND,
+                source="csaf",
+                extract_fn=extract_products_from_csaf,
+                products_cfg=products_cfg,
+                vendors_cfg=vendors_cfg,
+                watermark=watermark,
+                vendor_cache=vendor_cache,
+            )
         )
-        logger.info(f"  euvd: {docs} docs processed, {products} product entries upserted.")
-        total_docs     += docs
-        total_products += products
-        if wm and (new_watermark is None or wm > new_watermark):
-            new_watermark = wm
+        euvd_task = asyncio.create_task(
+            process_collection(
+                db_gridr, db_gridd,
+                collection=COLL_EUVD,
+                source="euvd",
+                extract_fn=extract_products_from_euvd,
+                products_cfg=products_cfg,
+                vendors_cfg=vendors_cfg,
+                watermark=watermark,
+                vendor_cache=vendor_cache,
+            )
+        )
+
+        (csaf_docs, csaf_products, csaf_wm), (euvd_docs, euvd_products, euvd_wm) = (
+            await asyncio.gather(csaf_task, euvd_task)
+        )
+
+        total_docs     = csaf_docs + euvd_docs
+        total_products = csaf_products + euvd_products
+
+        logger.info(f"  cert-bund: {csaf_docs} docs processed, {csaf_products} product entries upserted.")
+        logger.info(f"  euvd: {euvd_docs} docs processed, {euvd_products} product entries upserted.")
 
         # --- Advance watermark ---
+        new_watermark: datetime | None = None
+        for wm in (csaf_wm, euvd_wm):
+            if wm and (new_watermark is None or wm > new_watermark):
+                new_watermark = wm
+
         if new_watermark:
             await save_watermark(db_gridd, new_watermark)
         else:
             logger.info("  No new documents found — watermark unchanged.")
 
+        elapsed = time.perf_counter() - t_start
         logger.info("=" * 60)
         logger.info(
             f"PRODUCT PROCESSOR COMPLETE — "
             f"{total_docs} docs processed, "
-            f"{total_products} product entries upserted."
+            f"{total_products} product entries upserted "
+            f"in {elapsed:.1f}s."
         )
 
     except FileNotFoundError as exc:
