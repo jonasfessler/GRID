@@ -96,12 +96,13 @@ COLL_META      = "metadata"
 
 PROCESSOR_STATE_ID  = "product_processor"
 BATCH_SIZE          = 500           # cursor batch size
-UPSERT_BUFFER_SIZE  = 1000          # bulk-write flush threshold
+UPSERT_BUFFER_SIZE  = 5000          # bulk-write flush threshold
 MAX_DB_RETRIES      = 3
 RETRY_DELAY         = 2.0
 WORKER_COUNT        = max(1, (os.cpu_count() or 2) - 1)
 WORKER_BATCH_SIZE   = 100           # docs dispatched per worker chunk
 BULK_WRITE_DELAY    = 0.01          # seconds to sleep after each bulk flush
+LOG_EVERY_N         = 500           # log progress every N docs (0 = every doc)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -428,12 +429,27 @@ class VendorCache:
     In-memory cache for vendor lookups/creation within a single run.
     Avoids repeated DB round-trips for the same normalized vendor name.
     Thread-safe via asyncio.Lock per vendor name.
+
+    Call preload() at startup to bulk-load all existing vendors from DB,
+    so the hot path is always a dict lookup with zero DB calls.
     """
 
     def __init__(self) -> None:
         self._cache: dict[str, ObjectId | None] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
+
+    async def preload(self, db_gridd) -> int:
+        """Bulk-loads all vendors from GRIDd/vendors into cache. Returns count."""
+        cursor = db_gridd[COLL_VENDORS].find({}, {"name": 1})
+        count = 0
+        async for doc in cursor:
+            name = doc.get("name")
+            if name:
+                self._cache[name] = doc["_id"]
+                count += 1
+        logger.info(f"Vendor cache pre-loaded with {count} vendors.")
+        return count
 
     async def get_or_create(
         self,
@@ -446,7 +462,7 @@ class VendorCache:
         if not normalized_vendor:
             return None
 
-        # Fast path — already cached
+        # Fast path — already cached (covers preloaded + previously seen)
         if normalized_vendor in self._cache:
             return self._cache[normalized_vendor]
 
@@ -664,13 +680,14 @@ async def process_collection(
 
                         if not doc_result["products"]:
                             docs_processed += 1
-                            elapsed = time.perf_counter() - t_start
-                            rate    = docs_processed / elapsed if elapsed > 0 else 0
-                            logger.info(
-                                f"  [{source.upper()}] [{docs_processed}/{total_count}] "
-                                f"{doc_result['doc_id']} — 0 products (skipped) "
-                                f"({rate:.1f} docs/s)"
-                            )
+                            if LOG_EVERY_N == 0 or docs_processed % LOG_EVERY_N == 0:
+                                elapsed = time.perf_counter() - t_start
+                                rate    = docs_processed / elapsed if elapsed > 0 else 0
+                                logger.info(
+                                    f"  [{source.upper()}] [{docs_processed}/{total_count}] "
+                                    f"{doc_result['doc_id']} — 0 products (skipped) "
+                                    f"({rate:.1f} docs/s)"
+                                )
                             continue
 
                         entry_count  = 0
@@ -722,17 +739,18 @@ async def process_collection(
                         products_upserted += entry_count
                         docs_processed    += 1
 
-                        # Per-document progress log
-                        elapsed = time.perf_counter() - t_start
-                        rate    = docs_processed / elapsed if elapsed > 0 else 0
-                        error_note = (
-                            f", {entry_errors} errors" if entry_errors else ""
-                        )
-                        logger.info(
-                            f"  [{source.upper()}] [{docs_processed}/{total_count}] "
-                            f"{doc_result['doc_id']} — {entry_count} products"
-                            f"{error_note} ({rate:.1f} docs/s)"
-                        )
+                        # Throttled per-document progress log
+                        if LOG_EVERY_N == 0 or docs_processed % LOG_EVERY_N == 0 or docs_processed == total_count:
+                            elapsed = time.perf_counter() - t_start
+                            rate    = docs_processed / elapsed if elapsed > 0 else 0
+                            error_note = (
+                                f", {entry_errors} errors" if entry_errors else ""
+                            )
+                            logger.info(
+                                f"  [{source.upper()}] [{docs_processed}/{total_count}] "
+                                f"{doc_result['doc_id']} — {entry_count} products"
+                                f"{error_note} ({rate:.1f} docs/s)"
+                            )
 
         except Exception as exc:
             logger.error(
@@ -806,8 +824,10 @@ async def run() -> None:
         logger.info(f"PRODUCT PROCESSOR STARTED — watermark: {watermark.isoformat()}")
         logger.info("=" * 60)
 
-        # Shared vendor cache across both collections
+        # Shared vendor cache — preload all existing vendors to avoid
+        # DB round-trips in the hot path
         vendor_cache = VendorCache()
+        await vendor_cache.preload(db_gridd)
 
         t_start = time.perf_counter()
 
