@@ -47,21 +47,26 @@ Fault Tolerance
   - Transient DB errors trigger configurable retries with delay.
   - Missing vendor references are created inline (upsert) with a warning.
   - The watermark is only advanced after all documents in the batch succeed.
+  - Cursor loss (DB restart, timeout) triggers automatic resume from last
+    processed position — no manual intervention required.
 
 Performance
 -----------
   - Both collections (cert-bund, euvd) are processed concurrently.
-  - Product entries within a document are upserted concurrently via asyncio
-    semaphore-bounded gather (CONCURRENCY workers at a time).
-  - Vendors are cached in-memory to avoid repeated DB lookups.
-  - Bulk writes (UpdateOne ops) are flushed in UPSERT_BUFFER_SIZE batches.
+  - CPU-bound extraction and normalization are offloaded to a process pool
+    (WORKER_COUNT subprocesses) for true multi-core parallelism.
+  - Vendor cache lookups and bulk DB writes remain in the main async process.
+  - Bulk writes (UpdateOne ops) are flushed in UPSERT_BUFFER_SIZE batches
+    with a small delay between flushes to prevent DB overload.
 """
 
 import asyncio
 import json
 import logging
+import os
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
@@ -69,7 +74,7 @@ from typing import Any
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
-from pymongo.errors import PyMongoError
+from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -90,11 +95,13 @@ COLL_PRODUCTS  = "products"
 COLL_META      = "metadata"
 
 PROCESSOR_STATE_ID  = "product_processor"
-BATCH_SIZE          = 500           # cursor batch size (was 200)
-UPSERT_BUFFER_SIZE  = 500           # bulk-write flush threshold
-CONCURRENCY         = 20            # max concurrent entry-processing tasks
+BATCH_SIZE          = 500           # cursor batch size
+UPSERT_BUFFER_SIZE  = 1000          # bulk-write flush threshold
 MAX_DB_RETRIES      = 3
 RETRY_DELAY         = 2.0
+WORKER_COUNT        = max(1, (os.cpu_count() or 2) - 1)
+WORKER_BATCH_SIZE   = 100           # docs dispatched per worker chunk
+BULK_WRITE_DELAY    = 0.01          # seconds to sleep after each bulk flush
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -292,6 +299,80 @@ def extract_products_from_euvd(doc: dict) -> list[dict[str, Any]]:
     return results
 
 # ---------------------------------------------------------------------------
+# Worker: CPU-bound extraction + normalization (runs in subprocess)
+# ---------------------------------------------------------------------------
+
+def _extract_and_normalize_batch(
+    docs_data: list[dict],
+    source: str,
+    products_cfg: dict,
+    vendors_cfg: dict,
+) -> list[dict]:
+    """
+    CPU-bound worker function executed by ProcessPoolExecutor.
+
+    Runs extraction (CSAF or EUVD) and normalization on a batch of documents.
+    Pure function — no DB access, no shared state, fully pickle-safe.
+
+    Parameters
+    ----------
+    docs_data : list[dict]
+        Each dict has keys: doc (raw document dict), doc_id (str),
+        mirrored_at (datetime or None).
+    source : str
+        "csaf" or "euvd" — determines which extraction function to use.
+    products_cfg : dict
+        Loaded products.json config.
+    vendors_cfg : dict
+        Loaded vendors.json config.
+
+    Returns
+    -------
+    list[dict]
+        Each dict has keys: doc_id, mirrored_at, products (list of
+        normalized product dicts with norm_vendor, norm_product,
+        raw_vendor, raw_product, versions).
+    """
+    extract_fn = (
+        extract_products_from_csaf if source == "csaf"
+        else extract_products_from_euvd
+    )
+
+    results: list[dict] = []
+    for item in docs_data:
+        doc = item["doc"]
+        entries = extract_fn(doc)
+
+        products: list[dict] = []
+        for entry in entries:
+            raw_vendor  = entry["raw_vendor"]
+            raw_product = entry["raw_product"]
+
+            norm_vendor  = normalize_vendor_name(raw_vendor, vendors_cfg)
+            norm_product = normalize_product_name(
+                raw_product, norm_vendor, products_cfg
+            )
+
+            if not norm_product:
+                continue
+
+            products.append({
+                "norm_vendor":  norm_vendor,
+                "norm_product": norm_product,
+                "raw_vendor":   raw_vendor,
+                "raw_product":  raw_product,
+                "versions":     entry["versions"],
+            })
+
+        results.append({
+            "doc_id":      item["doc_id"],
+            "mirrored_at": item["mirrored_at"],
+            "products":    products,
+        })
+
+    return results
+
+# ---------------------------------------------------------------------------
 # DB Helpers
 # ---------------------------------------------------------------------------
 
@@ -459,18 +540,24 @@ async def process_collection(
     db_gridd,
     collection:   str,
     source:       str,
-    extract_fn,
     products_cfg: dict,
     vendors_cfg:  dict,
     watermark:    datetime,
     vendor_cache: VendorCache,
+    executor:     ProcessPoolExecutor,
 ) -> tuple[int, int, datetime | None]:
     """
     Queries a GRIDr collection for documents newer than watermark,
     extracts products from each, and upserts them into GRIDd/products.
 
-    Product entries within each document are processed concurrently
-    (bounded by CONCURRENCY semaphore) and written via bulk_write.
+    CPU-bound extraction and normalization are offloaded to a process pool
+    (via ``executor``).  Vendor cache lookups and bulk DB writes remain in
+    the main async process.
+
+    Uses a **resumable cursor** pattern: if the server-side cursor is lost
+    (e.g. DB restart, cursor timeout), the cursor is re-created from the
+    last successfully read ``mirrored_at`` value — no data loss, no manual
+    intervention.
 
     Returns (docs_processed, products_upserted, max_mirrored_at).
     """
@@ -483,131 +570,198 @@ async def process_collection(
     if total_count == 0:
         return 0, 0, None
 
-    query  = {"mirrored_at": {"$gt": watermark}}
-    cursor = db_gridr[collection].find(
-        query,
-        {"mirrored_at": 1, "product_tree": 1, "enisaIdVendor": 1, "enisaIdProduct": 1,
-         "document": 1},
-    ).batch_size(BATCH_SIZE)
+    projection = {
+        "mirrored_at": 1, "product_tree": 1, "enisaIdVendor": 1,
+        "enisaIdProduct": 1, "document": 1,
+    }
 
     docs_processed    = 0
     products_upserted = 0
     max_mirrored_at: datetime | None = None
 
-    semaphore = asyncio.Semaphore(CONCURRENCY)
     bulk = BulkUpsertBuffer(db_gridd[COLL_PRODUCTS])
-
     t_start = time.perf_counter()
+    loop = asyncio.get_running_loop()
 
-    async for doc in cursor:
+    # ---- Resumable cursor state ----
+    # First pass uses $gt (skip already-watermarked docs).
+    # On cursor loss, subsequent passes use $gte to avoid skipping docs
+    # that share the same mirrored_at as the last one we read.
+    resume_after = watermark
+    cursor_op    = "$gt"
+    chunk_size   = WORKER_BATCH_SIZE * WORKER_COUNT
+
+    while True:
+        cursor = db_gridr[collection].find(
+            {"mirrored_at": {cursor_op: resume_after}},
+            projection,
+            no_cursor_timeout=True,
+        ).sort("mirrored_at", 1).batch_size(BATCH_SIZE)
+
+        cursor_lost = False
         try:
-            mirrored = doc.get("mirrored_at")
-            if mirrored and mirrored.tzinfo is None:
-                mirrored = mirrored.replace(tzinfo=UTC)
-            if mirrored and (max_mirrored_at is None or mirrored > max_mirrored_at):
-                max_mirrored_at = mirrored
+            while True:
+                # --- Read a chunk of docs from the cursor ---
+                try:
+                    raw_docs = await cursor.to_list(length=chunk_size)
+                except OperationFailure as exc:
+                    if exc.code == 43:          # CursorNotFound
+                        cursor_lost = True
+                        break
+                    raise
+                except ConnectionFailure:
+                    cursor_lost = True
+                    await asyncio.sleep(RETRY_DELAY)
+                    break
 
-            product_entries = extract_fn(doc)
+                if not raw_docs:
+                    break                       # cursor exhausted
 
-            # Identify this document for logging
-            doc_id = (
-                doc.get("document", {}).get("tracking", {}).get("id")
-                or doc.get("id")
-                or str(doc.get("_id", "?"))
-            )
+                # --- Serialize docs for worker processes ---
+                docs_data: list[dict] = []
+                for doc in raw_docs:
+                    mirrored = doc.get("mirrored_at")
+                    if mirrored and mirrored.tzinfo is None:
+                        mirrored = mirrored.replace(tzinfo=UTC)
 
-            if not product_entries:
-                docs_processed += 1
-                logger.info(
-                    f"  [{source.upper()}] [{docs_processed}/{total_count}] "
-                    f"{doc_id} — 0 products (skipped)"
-                )
-                continue
-
-            # --- Process all entries concurrently with semaphore bound ---
-            async def process_entry(entry: dict) -> UpdateOne | None:
-                async with semaphore:
-                    raw_vendor  = entry["raw_vendor"]
-                    raw_product = entry["raw_product"]
-                    versions    = entry["versions"]
-
-                    norm_vendor  = normalize_vendor_name(raw_vendor, vendors_cfg)
-                    norm_product = normalize_product_name(raw_product, norm_vendor, products_cfg)
-
-                    if not norm_product:
-                        return None
-
-                    vendor_id = await vendor_cache.get_or_create(
-                        db_gridd, raw_vendor, norm_vendor, source
+                    doc_id = (
+                        doc.get("document", {}).get("tracking", {}).get("id")
+                        or doc.get("id")
+                        or str(doc.get("_id", "?"))
                     )
 
-                    now = datetime.now(UTC)
-                    op = UpdateOne(
-                        {"vendor_name": norm_vendor, "name": norm_product},
-                        {
-                            "$set":         {
-                                "name":        norm_product,
-                                "vendor_name": norm_vendor,
-                                "vendor_id":   vendor_id,
-                                "updated_at":  now,
-                            },
-                            "$setOnInsert": {"created_at": now},
-                            "$addToSet":    {
-                                "raw_names": raw_product,
-                                "sources":   source,
-                                "versions":  {"$each": versions},
-                            },
-                        },
-                        upsert=True,
+                    # Strip _id (ObjectId) — not needed by workers
+                    docs_data.append({
+                        "doc":         {k: v for k, v in doc.items() if k != "_id"},
+                        "doc_id":      doc_id,
+                        "mirrored_at": mirrored,
+                    })
+
+                    # Track resume position and global max
+                    if mirrored:
+                        resume_after = mirrored
+                        if max_mirrored_at is None or mirrored > max_mirrored_at:
+                            max_mirrored_at = mirrored
+
+                # --- Dispatch to process pool ---
+                sub_batches = [
+                    docs_data[i : i + WORKER_BATCH_SIZE]
+                    for i in range(0, len(docs_data), WORKER_BATCH_SIZE)
+                ]
+
+                futures = [
+                    loop.run_in_executor(
+                        executor, _extract_and_normalize_batch,
+                        batch, source, products_cfg, vendors_cfg,
                     )
+                    for batch in sub_batches
+                ]
+                worker_results = await asyncio.gather(*futures)
 
-                    logger.debug(
-                        f"    [PRODUCT] {raw_product!r} → {norm_product!r} "
-                        f"(vendor: {norm_vendor!r}, {source})"
-                    )
-                    return op
+                # --- Process results in main process (vendor cache + DB) ---
+                for batch_result in worker_results:
+                    for doc_result in batch_result:
 
-            # Gather all entry tasks concurrently
-            results = await asyncio.gather(
-                *(process_entry(e) for e in product_entries),
-                return_exceptions=True,
-            )
+                        if not doc_result["products"]:
+                            docs_processed += 1
+                            elapsed = time.perf_counter() - t_start
+                            rate    = docs_processed / elapsed if elapsed > 0 else 0
+                            logger.info(
+                                f"  [{source.upper()}] [{docs_processed}/{total_count}] "
+                                f"{doc_result['doc_id']} — 0 products (skipped) "
+                                f"({rate:.1f} docs/s)"
+                            )
+                            continue
 
-            entry_count = 0
-            entry_errors = 0
-            for r in results:
-                if isinstance(r, Exception):
-                    entry_errors += 1
-                    logger.error(f"    [ERROR] Entry processing failed: {r}")
-                elif r is not None:
-                    bulk.add(r)
-                    entry_count += 1
+                        entry_count  = 0
+                        entry_errors = 0
 
-            # Flush if buffer is full
-            flushed = await bulk.maybe_flush()
-            if flushed:
-                logger.info(f"    [BULK FLUSH] Wrote {flushed} product upserts to DB")
+                        for product in doc_result["products"]:
+                            try:
+                                vendor_id = await vendor_cache.get_or_create(
+                                    db_gridd, product["raw_vendor"],
+                                    product["norm_vendor"], source,
+                                )
 
-            products_upserted += entry_count
-            docs_processed    += 1
+                                now = datetime.now(UTC)
+                                op = UpdateOne(
+                                    {"vendor_name": product["norm_vendor"],
+                                     "name": product["norm_product"]},
+                                    {
+                                        "$set": {
+                                            "name":        product["norm_product"],
+                                            "vendor_name": product["norm_vendor"],
+                                            "vendor_id":   vendor_id,
+                                            "updated_at":  now,
+                                        },
+                                        "$setOnInsert": {"created_at": now},
+                                        "$addToSet": {
+                                            "raw_names": product["raw_product"],
+                                            "sources":   source,
+                                            "versions":  {"$each": product["versions"]},
+                                        },
+                                    },
+                                    upsert=True,
+                                )
+                                bulk.add(op)
+                                entry_count += 1
+                            except Exception as exc:
+                                entry_errors += 1
+                                logger.error(
+                                    f"    [ERROR] Entry processing failed: {exc}"
+                                )
 
-            # Per-document progress log (like join.py)
-            elapsed = time.perf_counter() - t_start
-            rate    = docs_processed / elapsed if elapsed > 0 else 0
-            error_note = f", {entry_errors} errors" if entry_errors else ""
-            logger.info(
-                f"  [{source.upper()}] [{docs_processed}/{total_count}] "
-                f"{doc_id} — {entry_count} products{error_note} "
-                f"({rate:.1f} docs/s)"
-            )
+                        # Flush if buffer is full
+                        flushed = await bulk.maybe_flush()
+                        if flushed:
+                            logger.info(
+                                f"    [BULK FLUSH] Wrote {flushed} product upserts to DB"
+                            )
+                            await asyncio.sleep(BULK_WRITE_DELAY)
+
+                        products_upserted += entry_count
+                        docs_processed    += 1
+
+                        # Per-document progress log
+                        elapsed = time.perf_counter() - t_start
+                        rate    = docs_processed / elapsed if elapsed > 0 else 0
+                        error_note = (
+                            f", {entry_errors} errors" if entry_errors else ""
+                        )
+                        logger.info(
+                            f"  [{source.upper()}] [{docs_processed}/{total_count}] "
+                            f"{doc_result['doc_id']} — {entry_count} products"
+                            f"{error_note} ({rate:.1f} docs/s)"
+                        )
 
         except Exception as exc:
-            logger.error(f"  [ERROR] Failed to process doc {doc.get('_id')}: {exc}")
+            logger.error(
+                f"  [{source.upper()}] Unexpected error during processing: {exc}"
+            )
+            cursor_lost = True
+        finally:
+            try:
+                await cursor.close()
+            except Exception:
+                pass                            # cursor already dead
+
+        if cursor_lost:
+            cursor_op = "$gte"                  # avoid skipping boundary docs
+            logger.warning(
+                f"  [{source.upper()}] Cursor lost at doc {docs_processed}/{total_count} "
+                f"— resuming from {resume_after.isoformat()}"
+            )
+            continue
+
+        break                                   # cursor exhausted normally
 
     # Final flush of remaining buffered ops
     remaining = await bulk.flush()
     if remaining:
-        logger.info(f"  [{source.upper()}] [BULK FLUSH] Final write: {remaining} product upserts")
+        logger.info(
+            f"  [{source.upper()}] [BULK FLUSH] Final write: "
+            f"{remaining} product upserts"
+        )
 
     elapsed = time.perf_counter() - t_start
     logger.info(
@@ -630,15 +784,19 @@ async def run() -> None:
     -----
     1. Load products.json and vendors.json configs.
     2. Connect to GRIDr and GRIDd.
-    3. Load the current watermark from GRIDd/metadata.
-    4. Process cert-bund and euvd collections concurrently.
-    5. Advance watermark to highest mirrored_at value in this batch.
+    3. Create a process pool for CPU-bound work.
+    4. Load the current watermark from GRIDd/metadata.
+    5. Process cert-bund and euvd collections concurrently.
+    6. Advance watermark to highest mirrored_at value in this batch.
     """
     products_cfg, vendors_cfg = load_configs()
 
     mongo_client = AsyncIOMotorClient(MONGO_URI)
     db_gridr     = mongo_client[GRIDR_DB]
     db_gridd     = mongo_client[GRIDD_DB]
+
+    executor = ProcessPoolExecutor(max_workers=WORKER_COUNT)
+    logger.info(f"Process pool created with {WORKER_COUNT} workers")
 
     try:
         await ensure_indexes(db_gridd)
@@ -659,11 +817,11 @@ async def run() -> None:
                 db_gridr, db_gridd,
                 collection=COLL_CERT_BUND,
                 source="csaf",
-                extract_fn=extract_products_from_csaf,
                 products_cfg=products_cfg,
                 vendors_cfg=vendors_cfg,
                 watermark=watermark,
                 vendor_cache=vendor_cache,
+                executor=executor,
             )
         )
         euvd_task = asyncio.create_task(
@@ -671,11 +829,11 @@ async def run() -> None:
                 db_gridr, db_gridd,
                 collection=COLL_EUVD,
                 source="euvd",
-                extract_fn=extract_products_from_euvd,
                 products_cfg=products_cfg,
                 vendors_cfg=vendors_cfg,
                 watermark=watermark,
                 vendor_cache=vendor_cache,
+                executor=executor,
             )
         )
 
@@ -717,6 +875,7 @@ async def run() -> None:
         logger.error(f"CRITICAL: Unexpected error — {exc}")
         raise
     finally:
+        executor.shutdown(wait=True)
         mongo_client.close()
 
 
